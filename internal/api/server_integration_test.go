@@ -1,0 +1,367 @@
+package api
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"path/filepath"
+	"strings"
+	"testing"
+	"time"
+
+	"pci/internal/config"
+	"pci/internal/verification"
+)
+
+func TestServerOfflineWorkflow(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "pci.db")
+	server := NewServer(config.Config{DataDir: dbPath, MaxBody: 1 << 20})
+	testServer := httptest.NewServer(server.Handler())
+	defer testServer.Close()
+
+	basePath := filepath.Join("..", "..", "fixtures", "base")
+	proposedPath := filepath.Join("..", "..", "fixtures", "proposed")
+
+	analysisResp := mustJSON[map[string]any](t, testServer.URL+"/api/v1/analyses", http.MethodPost, map[string]any{"path": basePath})
+	analysisID, ok := analysisResp["id"].(string)
+	if !ok || analysisID == "" {
+		t.Fatalf("analysis id missing from POST response: %#v", analysisResp)
+	}
+
+	findingsResp := mustJSON[map[string]any](t, testServer.URL+"/api/v1/analyses/"+analysisID+"/findings", http.MethodGet, nil)
+	if _, ok := findingsResp["findings"].([]any); !ok {
+		t.Fatalf("findings payload did not contain an array: %#v", findingsResp)
+	}
+
+	graphResp := mustJSON[map[string]any](t, testServer.URL+"/api/v1/analyses/"+analysisID+"/graph", http.MethodGet, nil)
+	if _, ok := graphResp["nodes"].([]any); !ok {
+		t.Fatalf("graph payload did not contain nodes: %#v", graphResp)
+	}
+
+	diffResp := mustJSON[map[string]any](t, testServer.URL+"/api/v1/diff", http.MethodPost, map[string]any{"basePath": basePath, "proposedPath": proposedPath})
+	if _, ok := diffResp["modified"].([]any); !ok {
+		t.Fatalf("diff response missing modified list: %#v", diffResp)
+	}
+
+	snapshotResp := mustJSON[map[string]any](t, testServer.URL+"/api/v1/snapshots", http.MethodPost, map[string]any{"path": proposedPath, "name": "proposed"})
+	snapshotID, ok := snapshotResp["id"].(string)
+	if !ok || snapshotID == "" {
+		t.Fatalf("snapshot id missing: %#v", snapshotResp)
+	}
+
+	loadedSnapshot := mustJSON[map[string]any](t, testServer.URL+"/api/v1/snapshots/"+snapshotID, http.MethodGet, nil)
+	if loadedSnapshot["id"] != snapshotID {
+		t.Fatalf("snapshot id mismatch: %#v", loadedSnapshot)
+	}
+
+	reportResp := mustJSON[map[string]any](t, testServer.URL+"/api/v1/reports", http.MethodPost, map[string]any{"path": basePath})
+	if _, ok := reportResp["summary"].(map[string]any); !ok {
+		t.Fatalf("report missing summary: %#v", reportResp)
+	}
+
+	compareResp := mustJSON[map[string]any](t, testServer.URL+"/api/v1/snapshots/"+snapshotID+"/compare", http.MethodPost, map[string]any{"targetId": snapshotID})
+	if compareResp["beforeSnapshotId"] == nil {
+		t.Fatalf("compare response missing beforeSnapshotId: %#v", compareResp)
+	}
+}
+
+func TestClusterDiscoveryOfflineResponseIsExplicitAndEmpty(t *testing.T) {
+	server := NewServer(config.Config{
+		DataDir:        filepath.Join(t.TempDir(), "pci.db"),
+		MaxBody:        1 << 20,
+		Namespace:      "backend",
+		KubeconfigPath: filepath.Join(t.TempDir(), "missing-kubeconfig"),
+	})
+	defer func() { _ = server.Store.Close() }()
+	testServer := httptest.NewServer(server.Handler())
+	defer testServer.Close()
+
+	response := mustJSON[map[string]any](t, testServer.URL+"/api/v1/clusters/dev/discover", http.MethodGet, nil)
+	if response["mode"] != "offline" || response["status"] != "not-configured" || response["complete"] != false {
+		t.Fatalf("offline discovery must be explicit and incomplete: %#v", response)
+	}
+	if len(response["workloads"].([]any)) != 0 || len(response["networkPolicies"].([]any)) != 0 {
+		t.Fatalf("offline discovery must not invent resources: %#v", response)
+	}
+}
+
+func TestConnectivityAPIUsesSharedAnalyzerAndPreservesUnknown(t *testing.T) {
+	server := NewServer(config.Config{DataDir: filepath.Join(t.TempDir(), "pci.db"), MaxBody: 1 << 20})
+	defer func() { _ = server.Store.Close() }()
+	testServer := httptest.NewServer(server.Handler())
+	defer testServer.Close()
+
+	manifest := `apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: api-ingress
+  namespace: server
+spec:
+  podSelector:
+    matchLabels:
+      app: api
+  policyTypes: [Ingress]
+  ingress:
+  - from:
+    - namespaceSelector:
+        matchLabels:
+          team: frontend
+      podSelector:
+        matchLabels:
+          app: web
+    ports:
+    - protocol: TCP
+      port: 8080
+`
+	query := map[string]any{
+		"source":      map[string]any{"namespace": "client", "name": "web", "labels": map[string]string{"app": "web"}, "labelsComplete": true, "namespaceLabels": map[string]string{"team": "frontend"}, "namespaceLabelsKnown": true},
+		"destination": map[string]any{"namespace": "server", "name": "api", "labels": map[string]string{"app": "api"}, "labelsComplete": true, "namespaceLabels": map[string]string{"team": "backend"}, "namespaceLabelsKnown": true},
+		"protocol":    "TCP", "port": 8080, "policyInventoryComplete": true,
+	}
+	result := mustJSON[map[string]any](t, testServer.URL+"/api/v1/connectivity", http.MethodPost, map[string]any{"manifest": manifest, "query": query})
+	if result["status"] != "allowed_by_model" || result["provenance"] != "modeled" {
+		t.Fatalf("connectivity API returned unexpected modeled result: %#v", result)
+	}
+
+	query["policyInventoryComplete"] = false
+	result = mustJSON[map[string]any](t, testServer.URL+"/api/v1/connectivity", http.MethodPost, map[string]any{
+		"manifest": `apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: non-policy
+`,
+		"query": query,
+	})
+	if result["status"] != "unknown" {
+		t.Fatalf("incomplete inventory should produce unknown, got %#v", result)
+	}
+
+	baseline := `apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: api-isolated
+  namespace: server
+spec:
+  podSelector:
+    matchLabels:
+      app: api
+  policyTypes: [Ingress]
+`
+	proposed := strings.Replace(baseline, "  policyTypes: [Ingress]\n", "  policyTypes: [Ingress]\n  ingress:\n  - {}\n", 1)
+	query["policyInventoryComplete"] = true
+	diff := mustJSON[map[string]any](t, testServer.URL+"/api/v1/connectivity/diff", http.MethodPost, map[string]any{
+		"baselineManifest": baseline, "proposedManifest": proposed, "query": query,
+	})
+	if diff["change"] != "newly_allowed" || diff["before"] != "denied_by_model" || diff["after"] != "allowed_by_model" {
+		t.Fatalf("connectivity diff did not report newly allowed flow: %#v", diff)
+	}
+	beforeResult, ok := diff["beforeResult"].(map[string]any)
+	if !ok || beforeResult["source"] != "client/web" || beforeResult["destination"] != "server/api" {
+		t.Fatalf("connectivity diff should retain endpoint-specific baseline evidence: %#v", diff)
+	}
+	policyChanges, ok := diff["policyChanges"].([]any)
+	if !ok || len(policyChanges) != 1 {
+		t.Fatalf("connectivity diff should identify changed policy evidence: %#v", diff)
+	}
+}
+
+func TestVerificationDisabledByDefaultAndRejectsInvalidRequests(t *testing.T) {
+	server := NewServer(config.Config{DataDir: filepath.Join(t.TempDir(), "pci.db"), MaxBody: 1 << 20})
+	defer func() { _ = server.Store.Close() }()
+	testServer := httptest.NewServer(server.Handler())
+	defer testServer.Close()
+
+	capabilities := mustJSON[map[string]any](t, testServer.URL+"/api/v1/capabilities", http.MethodGet, nil)
+	verificationCapabilities, ok := capabilities["verification"].(map[string]any)
+	if !ok || verificationCapabilities["enabled"] != false {
+		t.Fatalf("verification capability should be disabled by default: %#v", capabilities)
+	}
+
+	response, err := http.Post(testServer.URL+"/api/v1/verifications", "application/json", strings.NewReader(`{"sourceNamespace":"default","sourceWorkload":"api","destination":"db.example.test","protocol":"TCP","port":5432,"timeoutMillis":500}`))
+	if err != nil {
+		t.Fatalf("POST verification: %v", err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusServiceUnavailable {
+		t.Fatalf("verification status = %d, want %d", response.StatusCode, http.StatusServiceUnavailable)
+	}
+	var body map[string]any
+	if err := json.NewDecoder(response.Body).Decode(&body); err != nil {
+		t.Fatalf("decode disabled response: %v", err)
+	}
+	if body["code"] != "VERIFICATION_DISABLED" {
+		t.Fatalf("unexpected disabled response: %#v", body)
+	}
+
+	response, err = http.Post(testServer.URL+"/api/v1/verifications", "application/json", strings.NewReader(`{"sourceNamespace":"default","sourceWorkload":"api","destination":"db.example.test","protocol":"TCP;echo bad","port":5432,"timeoutMillis":500}`))
+	if err != nil {
+		t.Fatalf("POST invalid verification: %v", err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusBadRequest {
+		t.Fatalf("invalid request status = %d, want %d", response.StatusCode, http.StatusBadRequest)
+	}
+}
+
+func TestVerificationEvidenceIsPersistedAndNotMisrepresented(t *testing.T) {
+	server := NewServer(config.Config{DataDir: filepath.Join(t.TempDir(), "pci.db"), MaxBody: 1 << 20})
+	defer func() { _ = server.Store.Close() }()
+	server.VerificationProvider = verification.FakeProvider{Result: verification.Success}
+	testServer := httptest.NewServer(server.Handler())
+	defer testServer.Close()
+
+	requestBody := `{"sourceNamespace":"default","sourceWorkload":"api","destination":"db.example.test","protocol":"TCP","port":5432,"timeoutMillis":500}`
+	response, err := http.Post(testServer.URL+"/api/v1/verifications", "application/json", strings.NewReader(requestBody))
+	if err != nil {
+		t.Fatalf("POST without authorization: %v", err)
+	}
+	_ = response.Body.Close()
+	if response.StatusCode != http.StatusForbidden {
+		t.Fatalf("missing authorization status = %d, want %d", response.StatusCode, http.StatusForbidden)
+	}
+
+	allowTestVerification(server)
+	response, err = http.Post(testServer.URL+"/api/v1/verifications", "application/json", strings.NewReader(requestBody))
+	if err != nil {
+		t.Fatalf("POST verification: %v", err)
+	}
+	var evidence verification.Evidence
+	if err := json.NewDecoder(response.Body).Decode(&evidence); err != nil {
+		t.Fatalf("decode evidence: %v", err)
+	}
+	_ = response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("verification status = %d, want %d", response.StatusCode, http.StatusOK)
+	}
+	if evidence.ID == "" || evidence.State != "observed_success" || evidence.Provenance != "synthetic" ||
+		evidence.ModelComparison != "not-evaluated" || evidence.AttemptedAt.IsZero() {
+		t.Fatalf("evidence claims more than the provider established: %#v", evidence)
+	}
+	if evidence.Method != "synthetic-test" {
+		t.Fatalf("unexpected evidence method: %q", evidence.Method)
+	}
+
+	response, err = http.Get(testServer.URL + "/api/v1/verifications/" + evidence.ID)
+	if err != nil {
+		t.Fatalf("GET evidence: %v", err)
+	}
+	defer response.Body.Close()
+	var reopened verification.Evidence
+	if err := json.NewDecoder(response.Body).Decode(&reopened); err != nil {
+		t.Fatalf("decode persisted evidence: %v", err)
+	}
+	if reopened.ID != evidence.ID || reopened.Provenance != "synthetic" {
+		t.Fatalf("persisted evidence changed: %#v", reopened)
+	}
+}
+
+type secretErrorVerificationProvider struct{}
+
+func (secretErrorVerificationProvider) Name() string { return "failing-test-provider" }
+func (secretErrorVerificationProvider) Verify(context.Context, verification.Request) (verification.Evidence, error) {
+	return verification.Evidence{}, errors.New("request failed with bearer-token=do-not-leak")
+}
+
+func TestVerificationProviderErrorsAreRedacted(t *testing.T) {
+	server := NewServer(config.Config{DataDir: filepath.Join(t.TempDir(), "pci.db"), MaxBody: 1 << 20})
+	defer func() { _ = server.Store.Close() }()
+	server.VerificationProvider = secretErrorVerificationProvider{}
+	allowTestVerification(server)
+	testServer := httptest.NewServer(server.Handler())
+	defer testServer.Close()
+	requestBody := `{"sourceNamespace":"default","sourceWorkload":"api","destination":"db.example.test","protocol":"TCP","port":5432,"timeoutMillis":500}`
+	response, err := http.Post(testServer.URL+"/api/v1/verifications", "application/json", strings.NewReader(requestBody))
+	if err != nil {
+		t.Fatalf("POST verification: %v", err)
+	}
+	defer response.Body.Close()
+	body, err := io.ReadAll(response.Body)
+	if err != nil {
+		t.Fatalf("read error response: %v", err)
+	}
+	if response.StatusCode != http.StatusBadGateway || strings.Contains(string(body), "do-not-leak") {
+		t.Fatalf("provider error was not safely redacted: status=%d body=%s", response.StatusCode, body)
+	}
+}
+
+type unauthorizedVerificationProvider struct{}
+
+func (unauthorizedVerificationProvider) Name() string { return "unauthorized-test-provider" }
+func (unauthorizedVerificationProvider) Verify(context.Context, verification.Request) (verification.Evidence, error) {
+	return verification.Evidence{}, verification.ErrUnauthorized
+}
+
+func TestVerificationAuthorizationAndTimeoutErrors(t *testing.T) {
+	server := NewServer(config.Config{DataDir: filepath.Join(t.TempDir(), "pci.db"), MaxBody: 1 << 20})
+	defer func() { _ = server.Store.Close() }()
+	server.VerificationProvider = unauthorizedVerificationProvider{}
+	allowTestVerification(server)
+	testServer := httptest.NewServer(server.Handler())
+	defer testServer.Close()
+	requestBody := `{"sourceNamespace":"default","sourceWorkload":"api","destination":"db.example.test","protocol":"TCP","port":5432,"timeoutMillis":500}`
+
+	response, err := http.Post(testServer.URL+"/api/v1/verifications", "application/json", strings.NewReader(requestBody))
+	if err != nil {
+		t.Fatalf("POST unauthorized verification: %v", err)
+	}
+
+	_ = response.Body.Close()
+	if response.StatusCode != http.StatusForbidden {
+		t.Fatalf("authorization status = %d, want %d", response.StatusCode, http.StatusForbidden)
+	}
+
+	server.VerificationProvider = verification.FakeProvider{Result: verification.Success, Delay: 100 * time.Millisecond}
+	shortRequest := `{"sourceNamespace":"default","sourceWorkload":"api","destination":"db.example.test","protocol":"TCP","port":5432,"timeoutMillis":5}`
+	response, err = http.Post(testServer.URL+"/api/v1/verifications", "application/json", strings.NewReader(shortRequest))
+	if err != nil {
+		t.Fatalf("POST timed verification: %v", err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusGatewayTimeout {
+		t.Fatalf("timeout status = %d, want %d", response.StatusCode, http.StatusGatewayTimeout)
+	}
+}
+
+func allowTestVerification(server *Server) {
+	server.VerificationAuthorizer = verification.AllowListAuthorizer{
+		Sources:      []string{"default/api"},
+		Destinations: []string{"db.example.test"},
+		Protocols:    []string{"TCP"},
+		Ports:        []int{5432},
+	}
+}
+
+func mustJSON[T any](t *testing.T, url, method string, payload any) T {
+	t.Helper()
+	var body string
+	if payload != nil {
+		encoded, err := json.Marshal(payload)
+		if err != nil {
+			t.Fatalf("marshal payload: %v", err)
+		}
+		body = string(encoded)
+	}
+	request, err := http.NewRequest(method, url, strings.NewReader(body))
+	if err != nil {
+		t.Fatalf("create request: %v", err)
+	}
+	if payload != nil {
+		request.Header.Set("Content-Type", "application/json")
+	}
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatalf("do request: %v", err)
+	}
+	defer response.Body.Close()
+	var out T
+	if err := json.NewDecoder(response.Body).Decode(&out); err != nil {
+		t.Fatalf("decode response %s: %v", response.Status, err)
+	}
+	if response.StatusCode >= http.StatusBadRequest {
+		t.Fatalf("unexpected status %s for %s: %#v", response.Status, url, out)
+	}
+	return out
+}

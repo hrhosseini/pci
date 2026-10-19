@@ -1,0 +1,501 @@
+openapi: 3.0.3
+info:
+  title: PolicyChangeImpact API
+  version: 0.3.0
+  description: Offline NetworkPolicy analysis with explicit, separately-provenanced runtime evidence.
+servers:
+  - url: http://127.0.0.1:8080/api/v1
+paths:
+  /health:
+    get:
+      summary: Health check
+      responses:
+        '200':
+          description: Service health
+  /version:
+    get:
+      summary: Version and capabilities
+      responses:
+        '200':
+          description: Version metadata
+  /capabilities:
+    get:
+      summary: Available service capabilities
+      responses:
+        '200':
+          description: Capability list
+  /diff:
+    post:
+      summary: Compare baseline and proposed manifest paths
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                basePath:
+                  type: string
+                proposedPath:
+                  type: string
+                baseManifest:
+                  type: string
+                proposedManifest:
+                  type: string
+      responses:
+        '200':
+          description: Semantic diff report
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DiffReport'
+  /clusters/{clusterId}/discover:
+    get:
+      summary: Discover namespaces, Pods, workloads, and NetworkPolicies without writes
+      parameters:
+        - in: path
+          name: clusterId
+          required: true
+          schema: {type: string}
+      responses:
+        '200':
+          description: Discovery result; `complete` is false when any requested resource collection failed or was unavailable
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DiscoveryResult'
+        '502': {description: Cluster API is unavailable}
+  /connectivity:
+    post:
+      summary: Evaluate one connection against a supplied policy model
+      description: >
+        This is a prediction from the supplied policy documents only. It does
+        not contact a cluster or establish runtime connectivity. An incomplete
+        policy inventory or endpoint metadata yields unknown where needed.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [manifest, query]
+              properties:
+                manifest:
+                  type: string
+                query:
+                  $ref: '#/components/schemas/ConnectivityQuery'
+      responses:
+        '200':
+          description: Modeled connection result
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ConnectivityResult'
+        '400':
+          description: Invalid request or policy manifest
+  /connectivity/diff:
+    post:
+      summary: Compare one flow across baseline and proposed policy models
+      description: >
+        The change is a modeled transition only and does not use observed
+        traffic. Before/after results include applicable and matched rule
+        evidence; policyChanges are configuration deltas, not proof of causation.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [baselineManifest, proposedManifest, query]
+              properties:
+                baselineManifest: {type: string}
+                proposedManifest: {type: string}
+                query: {$ref: '#/components/schemas/ConnectivityQuery'}
+      responses:
+        '200':
+          description: Modeled before/after connectivity state and policy/rule evidence
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ConnectivityChange'
+        '400': {description: Invalid request or policy manifest}
+  /analyses:
+    get:
+      summary: List persisted analyses
+      responses:
+        '200':
+          description: Analysis collection
+    post:
+      summary: Run analysis on a path or inline manifest
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                path:
+                  type: string
+                manifest:
+                  type: string
+                name:
+                  type: string
+      responses:
+        '200':
+          description: Analysis payload
+  /analyses/{analysisId}:
+    get:
+      summary: Fetch one analysis by id
+      parameters:
+        - in: path
+          name: analysisId
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Analysis result
+  /analyses/{analysisId}/findings:
+    get:
+      summary: Fetch findings for an analysis
+      parameters:
+        - in: path
+          name: analysisId
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Findings payload
+  /analyses/{analysisId}/graph:
+    get:
+      summary: Fetch modeled graph for an analysis
+      parameters:
+        - in: path
+          name: analysisId
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Graph payload
+  /analyses/{analysisId}/explain/{findingId}:
+    get:
+      summary: Explain a specific finding using the analyzer model
+      parameters:
+        - in: path
+          name: analysisId
+          required: true
+          schema:
+            type: string
+        - in: path
+          name: findingId
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Explanation payload
+  /snapshots:
+    get:
+      summary: List persisted snapshots
+      responses:
+        '200':
+          description: Snapshot list
+    post:
+      summary: Create a snapshot from a path or inline manifest
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                path:
+                  type: string
+                manifest:
+                  type: string
+                name:
+                  type: string
+      responses:
+        '200':
+          description: Snapshot payload
+  /snapshots/{snapshotId}:
+    get:
+      summary: Fetch a snapshot by id
+      parameters:
+        - in: path
+          name: snapshotId
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Snapshot payload
+  /snapshots/{snapshotId}/compare:
+    post:
+      summary: Compare one snapshot against a target snapshot
+      parameters:
+        - in: path
+          name: snapshotId
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                targetId:
+                  type: string
+      responses:
+        '200':
+          description: Snapshot comparison result
+  /verifications:
+    get:
+      summary: List persisted verification evidence
+      responses:
+        '200':
+          description: Evidence records and whether a provider is configured
+    post:
+      summary: Request a constrained runtime observation
+      description: >
+        Runtime execution is disabled unless an explicitly configured provider
+        is installed. The current production build has no live probe provider;
+        it will return VERIFICATION_DISABLED and will not fabricate evidence.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [sourceNamespace, sourceWorkload, destination, protocol, port, timeoutMillis]
+              properties:
+                sourceNamespace:
+                  type: string
+                sourceWorkload:
+                  type: string
+                destination:
+                  type: string
+                  description: IP address or DNS name; never a shell command
+                protocol:
+                  type: string
+                  enum: [TCP, UDP]
+                port:
+                  type: integer
+                  minimum: 1
+                  maximum: 65535
+                timeoutMillis:
+                  type: integer
+                  minimum: 1
+                  maximum: 10000
+      responses:
+        '200':
+          description: Provider-returned, provenance-marked evidence; success/failure are observations, not policy-causation claims
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/VerificationEvidence'
+        '400': {description: Invalid verification request}
+        '403': {description: Configured provider lacks authorization}
+        '503': {description: Runtime verification disabled}
+        '504': {description: Probe timed out}
+  /verifications/{evidenceId}:
+    get:
+      summary: Retrieve persisted verification evidence
+      parameters:
+        - in: path
+          name: evidenceId
+          required: true
+          schema:
+            type: string
+      responses:
+        '200': {description: Persisted evidence}
+        '404': {description: Evidence not found}
+  /reports:
+    post:
+      summary: Generate a machine-readable report from an analysis
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                analysisId:
+                  type: string
+                path:
+                  type: string
+                manifest:
+                  type: string
+      responses:
+        '200':
+          description: Analysis report
+components:
+  schemas:
+    DiffReport:
+      type: object
+      properties:
+        added: {type: array, items: {type: string}}
+        removed: {type: array, items: {type: string}}
+        modified:
+          type: array
+          items:
+            type: object
+            required: [key, old, new, reason, changedFields]
+            properties:
+              key: {type: string}
+              old: {type: string, description: Summary and semantic fingerprint of the prior policy}
+              new: {type: string, description: Summary and semantic fingerprint of the proposed policy}
+              reason: {type: string}
+              changedFields:
+                type: array
+                items: {type: string, enum: [podSelector, policyTypes, ingressRules, egressRules]}
+              fieldChanges:
+                type: array
+                items: {$ref: '#/components/schemas/PolicyFieldChange'}
+    PolicyFieldChange:
+      type: object
+      required: [field, before, after]
+      properties:
+        field: {type: string}
+        before: {description: Normalized previous field value; JSON type depends on field}
+        after: {description: Normalized proposed field value; JSON type depends on field}
+    DiscoveryResult:
+      type: object
+      required: [mode, status, offline, complete, collectedAt]
+      properties:
+        mode: {type: string}
+        status: {type: string}
+        offline: {type: boolean}
+        complete: {type: boolean}
+        collectedAt: {type: string, format: date-time}
+        namespaces: {type: array, items: {type: string}}
+        namespaceLabels:
+          type: object
+          additionalProperties:
+            type: object
+            additionalProperties: {type: string}
+        workloads:
+          type: array
+          items:
+            type: object
+            properties:
+              namespace: {type: string}
+              name: {type: string}
+              kind: {type: string}
+              labels: {type: object, additionalProperties: {type: string}}
+              hostNetwork: {type: boolean}
+        networkPolicies:
+          type: array
+          items:
+            type: object
+            properties:
+              namespace: {type: string}
+              name: {type: string}
+              podSelector: {type: string}
+              policyTypes: {type: array, items: {type: string}}
+              ingressRules: {type: integer}
+              egressRules: {type: integer}
+        incomplete: {type: array, items: {type: string}}
+        warnings: {type: array, items: {type: string}}
+        errors: {type: array, items: {type: string}}
+    Endpoint:
+      type: object
+      required: [namespace, name, labelsComplete, namespaceLabelsKnown]
+      properties:
+        namespace: {type: string}
+        name: {type: string}
+        labels: {type: object, additionalProperties: {type: string}}
+        labelsComplete: {type: boolean}
+        namespaceLabels: {type: object, additionalProperties: {type: string}}
+        namespaceLabelsKnown: {type: boolean}
+        hostNetwork:
+          type: boolean
+          description: When true, connectivity is unknown because host-network enforcement is implementation-dependent.
+        ip: {type: string}
+        ipBlockAddressKnown:
+          type: boolean
+          description: Caller assertion that this is the address seen by NetworkPolicy enforcement and no node-traffic exception applies; otherwise ipBlock results remain unknown.
+        namedPortsComplete: {type: boolean}
+        namedPorts:
+          type: object
+          additionalProperties:
+            type: object
+            properties:
+              port: {type: integer}
+              protocol: {type: string, enum: [TCP, UDP, SCTP]}
+    ConnectivityQuery:
+      type: object
+      required: [source, destination, port, policyInventoryComplete]
+      properties:
+        source: {$ref: '#/components/schemas/Endpoint'}
+        destination: {$ref: '#/components/schemas/Endpoint'}
+        protocol: {type: string, enum: [TCP, UDP, SCTP], default: TCP}
+        port: {type: integer, minimum: 1, maximum: 65535}
+        policyInventoryComplete: {type: boolean}
+    ConnectivityResult:
+      type: object
+      required: [status, source, destination, protocol, port, policyInventoryComplete, ingress, egress, provenance]
+      properties:
+        status:
+          type: string
+          enum: [allowed_by_model, denied_by_model, unknown]
+        source: {type: string}
+        destination: {type: string}
+        protocol: {type: string}
+        port: {type: integer}
+        policyInventoryComplete: {type: boolean}
+        ingress: {type: object}
+        egress: {type: object}
+        reason: {type: string}
+        assumptions: {type: array, items: {type: string}}
+        unsupported: {type: array, items: {type: string}}
+        provenance: {type: string, enum: [modeled]}
+    ConnectivityChange:
+      type: object
+      required: [before, after, change, beforeResult, afterResult, policyChanges, explanation]
+      properties:
+        before: {type: string, enum: [allowed_by_model, denied_by_model, unknown]}
+        after: {type: string, enum: [allowed_by_model, denied_by_model, unknown]}
+        change: {type: string, enum: [newly_allowed, newly_denied, uncertain, unchanged]}
+        beforeResult: {$ref: '#/components/schemas/ConnectivityResult'}
+        afterResult: {$ref: '#/components/schemas/ConnectivityResult'}
+        policyChanges:
+          type: array
+          items:
+            type: object
+            required: [policy, change]
+            properties:
+              policy: {type: string}
+              change: {type: string, enum: [added, removed, modified]}
+              changedFields: {type: array, items: {type: string}}
+              fieldChanges:
+                type: array
+                items: {$ref: '#/components/schemas/PolicyFieldChange'}
+        explanation:
+          type: string
+          description: Model explanation only; not runtime evidence or proof of policy causation.
+    VerificationEvidence:
+      type: object
+      required: [id, sourceNamespace, sourceWorkload, destination, protocol, port, attemptedAt, duration, outcome, state, method, provenance, limitations]
+      properties:
+        id: {type: string}
+        sourceNamespace: {type: string}
+        sourceWorkload: {type: string}
+        destination: {type: string}
+        protocol: {type: string, enum: [TCP, UDP]}
+        port: {type: integer}
+        attemptedAt: {type: string, format: date-time}
+        duration: {type: integer, description: Duration in nanoseconds}
+        outcome: {type: string, enum: [success, failure, timeout, unknown]}
+        state: {type: string, enum: [observed_success, observed_failure, unknown]}
+        method: {type: string}
+        errorClass: {type: string}
+        cluster: {type: string}
+        context: {type: string}
+        limitations: {type: array, items: {type: string}}
+        provenance: {type: string}
+        modelComparison: {type: string}
