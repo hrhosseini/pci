@@ -6,12 +6,20 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	_ "github.com/mattn/go-sqlite3"
 )
 
 var ErrNotFound = errors.New("record not found")
+var ErrIdempotencyConflict = errors.New("idempotency key was already used for a different request")
+var ErrIdempotencyInProgress = errors.New("idempotent verification request is already in progress")
+
+type VerificationRequestState struct {
+	Complete bool
+	Payload  string
+}
 
 // Record stores metadata and payload for persisted API objects.
 type Record struct {
@@ -34,15 +42,23 @@ func Open(path string) (*Store, error) {
 		return nil, errors.New("sqlite path is required")
 	}
 	if dir := filepath.Dir(path); dir != "." && dir != "" {
-		if err := os.MkdirAll(dir, 0o755); err != nil {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
 			return nil, fmt.Errorf("create sqlite directory: %w", err)
 		}
 	}
 
-	db, err := sql.Open("sqlite3", path)
+	// Single connection avoids concurrent write races with go-sqlite3; busy
+	// timeout lets short-lived lock contention wait instead of failing immediately.
+	dsn := path
+	if !strings.Contains(path, "?") {
+		dsn = path + "?_busy_timeout=5000"
+	}
+	db, err := sql.Open("sqlite3", dsn)
 	if err != nil {
 		return nil, err
 	}
+	db.SetMaxOpenConns(1)
+	db.SetMaxIdleConns(1)
 	if err := db.Ping(); err != nil {
 		_ = db.Close()
 		return nil, err
@@ -50,6 +66,12 @@ func Open(path string) (*Store, error) {
 	if err := migrate(db); err != nil {
 		_ = db.Close()
 		return nil, err
+	}
+	for _, candidate := range []string{path, path + "-wal", path + "-shm"} {
+		if err := os.Chmod(candidate, 0o600); err != nil && !errors.Is(err, os.ErrNotExist) {
+			_ = db.Close()
+			return nil, fmt.Errorf("restrict sqlite file mode: %w", err)
+		}
 	}
 	return &Store{DB: db}, nil
 }
@@ -87,6 +109,13 @@ func migrate(db *sql.DB) error {
 		`CREATE TABLE IF NOT EXISTS verification_evidence (
 			id TEXT PRIMARY KEY,
 			payload TEXT NOT NULL,
+			created_at TEXT NOT NULL
+		);`,
+		`CREATE TABLE IF NOT EXISTS verification_requests (
+			idempotency_key TEXT PRIMARY KEY,
+			request_hash TEXT NOT NULL,
+			state TEXT NOT NULL CHECK (state IN ('in_progress', 'complete')),
+			payload TEXT,
 			created_at TEXT NOT NULL
 		);`,
 		`CREATE INDEX IF NOT EXISTS idx_analyses_created_at ON analyses(created_at DESC);`,
@@ -141,10 +170,78 @@ func (s *Store) SaveReport(id, kind, name, payload string) error {
 func (s *Store) SaveVerificationEvidence(id, payload string) error {
 	return s.withTx(func(tx *sql.Tx) error {
 		_, err := tx.Exec(
-			`INSERT OR REPLACE INTO verification_evidence (id, payload, created_at) VALUES (?, ?, ?)`,
+			`INSERT INTO verification_evidence (id, payload, created_at) VALUES (?, ?, ?)`,
 			id, payload, time.Now().UTC().Format(time.RFC3339Nano),
 		)
 		return err
+	})
+}
+
+func (s *Store) StartVerificationRequest(key, requestHash string) (VerificationRequestState, error) {
+	if key == "" || requestHash == "" {
+		return VerificationRequestState{}, errors.New("idempotency key and request hash are required")
+	}
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	result, err := s.DB.Exec(
+		`INSERT OR IGNORE INTO verification_requests (idempotency_key, request_hash, state, created_at)
+		 VALUES (?, ?, 'in_progress', ?)`,
+		key, requestHash, now,
+	)
+	if err != nil {
+		return VerificationRequestState{}, err
+	}
+	inserted, err := result.RowsAffected()
+	if err != nil {
+		return VerificationRequestState{}, err
+	}
+	if inserted == 1 {
+		return VerificationRequestState{}, nil
+	}
+
+	var savedHash, state string
+	var payload sql.NullString
+	if err := s.DB.QueryRow(
+		`SELECT request_hash, state, payload FROM verification_requests WHERE idempotency_key = ?`,
+		key,
+	).Scan(&savedHash, &state, &payload); err != nil {
+		return VerificationRequestState{}, err
+	}
+	if savedHash != requestHash {
+		return VerificationRequestState{}, ErrIdempotencyConflict
+	}
+	if state == "in_progress" {
+		return VerificationRequestState{}, ErrIdempotencyInProgress
+	}
+	if !payload.Valid {
+		return VerificationRequestState{}, errors.New("completed verification request has no evidence payload")
+	}
+	return VerificationRequestState{Complete: true, Payload: payload.String}, nil
+}
+
+func (s *Store) CompleteVerificationRequest(key, requestHash, id, payload string) error {
+	return s.withTx(func(tx *sql.Tx) error {
+		if _, err := tx.Exec(
+			`INSERT INTO verification_evidence (id, payload, created_at) VALUES (?, ?, ?)`,
+			id, payload, time.Now().UTC().Format(time.RFC3339Nano),
+		); err != nil {
+			return err
+		}
+		result, err := tx.Exec(
+			`UPDATE verification_requests SET state = 'complete', payload = ?
+			 WHERE idempotency_key = ? AND request_hash = ? AND state = 'in_progress'`,
+			payload, key, requestHash,
+		)
+		if err != nil {
+			return err
+		}
+		updated, err := result.RowsAffected()
+		if err != nil {
+			return err
+		}
+		if updated != 1 {
+			return errors.New("verification request reservation is missing or no longer active")
+		}
+		return nil
 	})
 }
 

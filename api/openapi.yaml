@@ -5,27 +5,38 @@ info:
   description: Offline NetworkPolicy analysis with explicit, separately-provenanced runtime evidence.
 servers:
   - url: http://127.0.0.1:8080/api/v1
+security: []
 paths:
   /health:
     get:
+      operationId: healthCheck
       summary: Health check
       responses:
         '200':
           description: Service health
+        '4XX':
+          $ref: '#/components/responses/ClientError'
   /version:
     get:
+      operationId: getVersion
       summary: Version and capabilities
       responses:
         '200':
           description: Version metadata
+        '4XX':
+          $ref: '#/components/responses/ClientError'
   /capabilities:
     get:
+      operationId: getCapabilities
       summary: Available service capabilities
       responses:
         '200':
           description: Capability list
+        '4XX':
+          $ref: '#/components/responses/ClientError'
   /diff:
     post:
+      operationId: comparePolicies
       summary: Compare baseline and proposed manifest paths
       requestBody:
         required: true
@@ -49,8 +60,11 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/DiffReport'
+        '4XX':
+          $ref: '#/components/responses/ClientError'
   /clusters/{clusterId}/discover:
     get:
+      operationId: discoverCluster
       summary: Discover namespaces, Pods, workloads, and NetworkPolicies without writes
       parameters:
         - in: path
@@ -65,8 +79,11 @@ paths:
               schema:
                 $ref: '#/components/schemas/DiscoveryResult'
         '502': {description: Cluster API is unavailable}
+        '4XX':
+          $ref: '#/components/responses/ClientError'
   /connectivity:
     post:
+      operationId: evaluateConnectivity
       summary: Evaluate one connection against a supplied policy model
       description: >
         This is a prediction from the supplied policy documents only. It does
@@ -95,6 +112,7 @@ paths:
           description: Invalid request or policy manifest
   /connectivity/diff:
     post:
+      operationId: compareConnectivity
       summary: Compare one flow across baseline and proposed policy models
       description: >
         The change is a modeled transition only and does not use observed
@@ -121,11 +139,15 @@ paths:
         '400': {description: Invalid request or policy manifest}
   /analyses:
     get:
+      operationId: listAnalyses
       summary: List persisted analyses
       responses:
         '200':
           description: Analysis collection
+        '4XX':
+          $ref: '#/components/responses/ClientError'
     post:
+      operationId: createAnalysis
       summary: Run analysis on a path or inline manifest
       requestBody:
         required: true
@@ -143,8 +165,11 @@ paths:
       responses:
         '200':
           description: Analysis payload
+        '4XX':
+          $ref: '#/components/responses/ClientError'
   /analyses/{analysisId}:
     get:
+      operationId: getAnalysis
       summary: Fetch one analysis by id
       parameters:
         - in: path
@@ -155,8 +180,11 @@ paths:
       responses:
         '200':
           description: Analysis result
+        '4XX':
+          $ref: '#/components/responses/ClientError'
   /analyses/{analysisId}/findings:
     get:
+      operationId: getAnalysisFindings
       summary: Fetch findings for an analysis
       parameters:
         - in: path
@@ -167,8 +195,11 @@ paths:
       responses:
         '200':
           description: Findings payload
+        '4XX':
+          $ref: '#/components/responses/ClientError'
   /analyses/{analysisId}/graph:
     get:
+      operationId: getAnalysisGraph
       summary: Fetch modeled graph for an analysis
       parameters:
         - in: path
@@ -179,8 +210,11 @@ paths:
       responses:
         '200':
           description: Graph payload
+        '4XX':
+          $ref: '#/components/responses/ClientError'
   /analyses/{analysisId}/explain/{findingId}:
     get:
+      operationId: explainFinding
       summary: Explain a specific finding using the analyzer model
       parameters:
         - in: path
@@ -196,13 +230,19 @@ paths:
       responses:
         '200':
           description: Explanation payload
+        '4XX':
+          $ref: '#/components/responses/ClientError'
   /snapshots:
     get:
+      operationId: listSnapshots
       summary: List persisted snapshots
       responses:
         '200':
           description: Snapshot list
+        '4XX':
+          $ref: '#/components/responses/ClientError'
     post:
+      operationId: createSnapshot
       summary: Create a snapshot from a path or inline manifest
       requestBody:
         required: true
@@ -220,8 +260,11 @@ paths:
       responses:
         '200':
           description: Snapshot payload
+        '4XX':
+          $ref: '#/components/responses/ClientError'
   /snapshots/{snapshotId}:
     get:
+      operationId: getSnapshot
       summary: Fetch a snapshot by id
       parameters:
         - in: path
@@ -232,8 +275,11 @@ paths:
       responses:
         '200':
           description: Snapshot payload
+        '4XX':
+          $ref: '#/components/responses/ClientError'
   /snapshots/{snapshotId}/compare:
     post:
+      operationId: compareSnapshots
       summary: Compare one snapshot against a target snapshot
       parameters:
         - in: path
@@ -253,18 +299,39 @@ paths:
       responses:
         '200':
           description: Snapshot comparison result
+        '4XX':
+          $ref: '#/components/responses/ClientError'
   /verifications:
     get:
+      operationId: listVerifications
       summary: List persisted verification evidence
       responses:
         '200':
           description: Evidence records and whether a provider is configured
+        '4XX':
+          $ref: '#/components/responses/ClientError'
     post:
+      operationId: createVerification
       summary: Request a constrained runtime observation
       description: >
         Runtime execution is disabled unless an explicitly configured provider
         is installed. The current production build has no live probe provider;
         it will return VERIFICATION_DISABLED and will not fabricate evidence.
+        An optional Idempotency-Key (1–128 visible ASCII characters) makes
+        retries of the same request return the original persisted evidence.
+        Reuse with different request content returns 409. If an attempt has
+        started but not completed persistence, retries are refused rather than
+        risking a second probe.
+      parameters:
+        - in: header
+          name: Idempotency-Key
+          required: false
+          schema:
+            type: string
+            minLength: 1
+            maxLength: 128
+            pattern: '^[!-~]+$'
+          description: Optional stable key for safe retry behavior.
       requestBody:
         required: true
         content:
@@ -291,6 +358,14 @@ paths:
                   type: integer
                   minimum: 1
                   maximum: 10000
+                analysisId:
+                  type: string
+                  maxLength: 128
+                  description: Optional persisted analysis reference used to associate the observation with its modeled context
+                snapshotId:
+                  type: string
+                  maxLength: 128
+                  description: Optional persisted policy snapshot reference used to associate the observation with its policy context
       responses:
         '200':
           description: Provider-returned, provenance-marked evidence; success/failure are observations, not policy-causation claims
@@ -300,10 +375,13 @@ paths:
                 $ref: '#/components/schemas/VerificationEvidence'
         '400': {description: Invalid verification request}
         '403': {description: Configured provider lacks authorization}
+        '404': {description: Referenced analysis or snapshot does not exist}
+        '409': {description: Idempotency key conflict or a prior request remains in progress}
         '503': {description: Runtime verification disabled}
         '504': {description: Probe timed out}
   /verifications/{evidenceId}:
     get:
+      operationId: getVerification
       summary: Retrieve persisted verification evidence
       parameters:
         - in: path
@@ -316,6 +394,7 @@ paths:
         '404': {description: Evidence not found}
   /reports:
     post:
+      operationId: createReport
       summary: Generate a machine-readable report from an analysis
       requestBody:
         required: true
@@ -333,7 +412,12 @@ paths:
       responses:
         '200':
           description: Analysis report
+        '4XX':
+          $ref: '#/components/responses/ClientError'
 components:
+  responses:
+    ClientError:
+      description: Client error for an invalid request, missing resource, or unsupported operation.
   schemas:
     DiffReport:
       type: object
@@ -480,7 +564,7 @@ components:
           description: Model explanation only; not runtime evidence or proof of policy causation.
     VerificationEvidence:
       type: object
-      required: [id, sourceNamespace, sourceWorkload, destination, protocol, port, attemptedAt, duration, outcome, state, method, provenance, limitations]
+      required: [id, sourceNamespace, sourceWorkload, destination, protocol, port, attemptedAt, duration, outcome, state, timeoutMillis, method, provenance, limitations]
       properties:
         id: {type: string}
         sourceNamespace: {type: string}
@@ -492,10 +576,16 @@ components:
         duration: {type: integer, description: Duration in nanoseconds}
         outcome: {type: string, enum: [success, failure, timeout, unknown]}
         state: {type: string, enum: [observed_success, observed_failure, unknown]}
+        timeoutMillis: {type: integer, minimum: 1, maximum: 10000}
         method: {type: string}
         errorClass: {type: string}
         cluster: {type: string}
         context: {type: string}
+        cni: {type: string, description: CNI identity when known; never inferred}
+        analysisId: {type: string}
+        snapshotId: {type: string}
+        discoveryComplete: {type: boolean, description: Omitted when discovery completeness is unknown}
+        discoveryCollectedAt: {type: string, format: date-time, description: Omitted when the observation is not linked to a discovery snapshot}
         limitations: {type: array, items: {type: string}}
         provenance: {type: string}
         modelComparison: {type: string}

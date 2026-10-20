@@ -27,26 +27,34 @@ type Request struct {
 	Port            int           `json:"port"`
 	Timeout         time.Duration `json:"-"`
 	TimeoutMillis   int           `json:"timeoutMillis"`
+	AnalysisID      string        `json:"analysisId,omitempty"`
+	SnapshotID      string        `json:"snapshotId,omitempty"`
 }
 
 type Evidence struct {
-	ID              string        `json:"id"`
-	SourceNamespace string        `json:"sourceNamespace"`
-	SourceWorkload  string        `json:"sourceWorkload"`
-	Destination     string        `json:"destination"`
-	Protocol        string        `json:"protocol"`
-	Port            int           `json:"port"`
-	AttemptedAt     time.Time     `json:"attemptedAt"`
-	Duration        time.Duration `json:"duration"`
-	Outcome         Outcome       `json:"outcome"`
-	State           string        `json:"state"`
-	ModelComparison string        `json:"modelComparison"`
-	Method          string        `json:"method"`
-	ErrorClass      string        `json:"errorClass,omitempty"`
-	Cluster         string        `json:"cluster,omitempty"`
-	Context         string        `json:"context,omitempty"`
-	Limitations     []string      `json:"limitations"`
-	Provenance      string        `json:"provenance"`
+	ID                   string        `json:"id"`
+	SourceNamespace      string        `json:"sourceNamespace"`
+	SourceWorkload       string        `json:"sourceWorkload"`
+	Destination          string        `json:"destination"`
+	Protocol             string        `json:"protocol"`
+	Port                 int           `json:"port"`
+	AttemptedAt          time.Time     `json:"attemptedAt"`
+	Duration             time.Duration `json:"duration"`
+	Outcome              Outcome       `json:"outcome"`
+	State                string        `json:"state"`
+	ModelComparison      string        `json:"modelComparison"`
+	TimeoutMillis        int           `json:"timeoutMillis"`
+	Method               string        `json:"method"`
+	ErrorClass           string        `json:"errorClass,omitempty"`
+	Cluster              string        `json:"cluster,omitempty"`
+	Context              string        `json:"context,omitempty"`
+	CNI                  string        `json:"cni,omitempty"`
+	AnalysisID           string        `json:"analysisId,omitempty"`
+	SnapshotID           string        `json:"snapshotId,omitempty"`
+	DiscoveryComplete    *bool         `json:"discoveryComplete,omitempty"`
+	DiscoveryCollectedAt *time.Time    `json:"discoveryCollectedAt,omitempty"`
+	Limitations          []string      `json:"limitations"`
+	Provenance           string        `json:"provenance"`
 }
 
 type Provider interface {
@@ -102,6 +110,12 @@ func ValidateRequest(request Request) error {
 	if request.Port < 1 || request.Port > 65535 {
 		return errors.New("port must be between 1 and 65535")
 	}
+	if len(request.AnalysisID) > 128 || strings.ContainsAny(request.AnalysisID, "\r\n\x00") {
+		return errors.New("analysisId must be at most 128 characters")
+	}
+	if len(request.SnapshotID) > 128 || strings.ContainsAny(request.SnapshotID, "\r\n\x00") {
+		return errors.New("snapshotId must be at most 128 characters")
+	}
 	timeout := request.TimeoutMillis
 	if request.Timeout > 0 {
 		timeout = int(request.Timeout / time.Millisecond)
@@ -145,7 +159,10 @@ func (provider FakeProvider) Verify(ctx context.Context, request Request) (Evide
 		Outcome:         outcome,
 		State:           stateForOutcome(outcome),
 		ModelComparison: "not-evaluated",
+		TimeoutMillis:   request.TimeoutMillis,
 		Method:          "synthetic-test",
+		AnalysisID:      request.AnalysisID,
+		SnapshotID:      request.SnapshotID,
 		Limitations:     []string{"Synthetic test evidence; no network probe was executed.", "A connection outcome cannot by itself prove NetworkPolicy causation."},
 		Provenance:      "synthetic",
 	}

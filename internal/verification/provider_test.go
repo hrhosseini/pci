@@ -24,6 +24,8 @@ func TestValidateRequest(t *testing.T) {
 		{name: "reject unbounded timeout", mutate: func(r *Request) { r.TimeoutMillis = 10001 }, wantErr: true},
 		{name: "reject invalid workload identity", mutate: func(r *Request) { r.SourceWorkload = "../pod" }, wantErr: true},
 		{name: "reject invalid destination", mutate: func(r *Request) { r.Destination = "host;command" }, wantErr: true},
+		{name: "reject multiline analysis reference", mutate: func(r *Request) { r.AnalysisID = "analysis\nsecret" }, wantErr: true},
+		{name: "reject oversized snapshot reference", mutate: func(r *Request) { r.SnapshotID = string(make([]byte, 129)) }, wantErr: true},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -48,13 +50,17 @@ func TestFakeProviderHonorsCancellationAndMarksSynthetic(t *testing.T) {
 	}
 
 	evidence, err := (FakeProvider{Result: Failure}).Verify(context.Background(), Request{
-		SourceNamespace: "payments", SourceWorkload: "api", Destination: "db.example.test", Protocol: "TCP", Port: 5432,
+		SourceNamespace: "payments", SourceWorkload: "api", Destination: "db.example.test",
+		Protocol: "TCP", Port: 5432, TimeoutMillis: 500, AnalysisID: "analysis-1", SnapshotID: "snapshot-1",
 	})
 	if err != nil {
 		t.Fatalf("Verify returned error: %v", err)
 	}
 	if evidence.Provenance != "synthetic" || evidence.State != "observed_failure" || evidence.ModelComparison != "not-evaluated" {
 		t.Fatalf("fake provider returned misleading evidence: %#v", evidence)
+	}
+	if evidence.TimeoutMillis != 500 || evidence.AnalysisID != "analysis-1" || evidence.SnapshotID != "snapshot-1" {
+		t.Fatalf("fake provider omitted verification context: %#v", evidence)
 	}
 }
 

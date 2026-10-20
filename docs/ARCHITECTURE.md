@@ -32,6 +32,8 @@ PolicyChangeImpact is structured as a Go monolith with clear internal boundaries
 - The production server installs no provider, so runtime probes remain disabled.
 - A deterministic synthetic provider is available only to tests and marks provenance as synthetic.
 - There is no workload exec implementation in this phase; no shell command or cluster write path exists.
+- Verification records retain the requested timeout and can link persisted analyses and snapshots. Provider-supplied CNI identity and discovery freshness/completeness are optional and are not inferred.
+- The opt-in live harness creates a separate kind cluster with the default CNI disabled and pinned Calico; it is not part of application startup or the default tests.
 
 ### Frontend
 - `web` is a Vite + React + TypeScript application.
@@ -50,3 +52,4 @@ PolicyChangeImpact is structured as a Go monolith with clear internal boundaries
 - Approval is required before any mutation workflow begins.
 - Operational results are marked as observed, modeled, or verified to avoid cross-label confusion.
 - Evidence metadata is preserved for auditing and review.
+- The HTTP API is unauthenticated; keep it on a trusted local interface. PCI does not request Kubernetes `pods/exec`, whose RBAC permission would enable powerful command execution.

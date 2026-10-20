@@ -9,12 +9,37 @@ import (
 	"net/http/httptest"
 	"path/filepath"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"pci/internal/config"
 	"pci/internal/verification"
 )
+
+func TestValidateListenAddressRequiresLoopbackByDefault(t *testing.T) {
+	t.Setenv("PCI_ALLOW_NON_LOOPBACK", "")
+	if err := validateListenAddress("127.0.0.1"); err != nil {
+		t.Fatalf("loopback IPv4 should be allowed: %v", err)
+	}
+	if err := validateListenAddress("::1"); err != nil {
+		t.Fatalf("loopback IPv6 should be allowed: %v", err)
+	}
+	if err := validateListenAddress("localhost"); err != nil {
+		t.Fatalf("localhost should be allowed: %v", err)
+	}
+	if err := validateListenAddress(""); err == nil {
+		t.Fatal("empty address must be rejected without override")
+	}
+	if err := validateListenAddress("0.0.0.0"); err == nil {
+		t.Fatal("0.0.0.0 must be rejected without override")
+	}
+	t.Setenv("PCI_ALLOW_NON_LOOPBACK", "1")
+	if err := validateListenAddress("0.0.0.0"); err != nil {
+		t.Fatalf("override should allow non-loopback bind: %v", err)
+	}
+}
 
 func TestServerOfflineWorkflow(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "pci.db")
@@ -224,6 +249,10 @@ func TestVerificationEvidenceIsPersistedAndNotMisrepresented(t *testing.T) {
 	}
 
 	allowTestVerification(server)
+	if err := server.Store.SaveAnalysis("analysis-test", "analysis", "test", "", `{}`); err != nil {
+		t.Fatalf("save referenced analysis: %v", err)
+	}
+	requestBody = `{"sourceNamespace":"default","sourceWorkload":"api","destination":"db.example.test","protocol":"TCP","port":5432,"timeoutMillis":500,"analysisId":"analysis-test"}`
 	response, err = http.Post(testServer.URL+"/api/v1/verifications", "application/json", strings.NewReader(requestBody))
 	if err != nil {
 		t.Fatalf("POST verification: %v", err)
@@ -237,11 +266,23 @@ func TestVerificationEvidenceIsPersistedAndNotMisrepresented(t *testing.T) {
 		t.Fatalf("verification status = %d, want %d", response.StatusCode, http.StatusOK)
 	}
 	if evidence.ID == "" || evidence.State != "observed_success" || evidence.Provenance != "synthetic" ||
-		evidence.ModelComparison != "not-evaluated" || evidence.AttemptedAt.IsZero() {
+		evidence.ModelComparison != "not-evaluated" || evidence.AttemptedAt.IsZero() ||
+		evidence.TimeoutMillis != 500 || evidence.AnalysisID != "analysis-test" {
 		t.Fatalf("evidence claims more than the provider established: %#v", evidence)
 	}
 	if evidence.Method != "synthetic-test" {
 		t.Fatalf("unexpected evidence method: %q", evidence.Method)
+	}
+
+	missingReferenceResponse, err := http.Post(testServer.URL+"/api/v1/verifications", "application/json", strings.NewReader(
+		`{"sourceNamespace":"default","sourceWorkload":"api","destination":"db.example.test","protocol":"TCP","port":5432,"timeoutMillis":500,"analysisId":"missing-analysis"}`,
+	))
+	if err != nil {
+		t.Fatalf("POST verification with missing analysis reference: %v", err)
+	}
+	_ = missingReferenceResponse.Body.Close()
+	if missingReferenceResponse.StatusCode != http.StatusNotFound {
+		t.Fatalf("missing analysis reference status = %d, want %d", missingReferenceResponse.StatusCode, http.StatusNotFound)
 	}
 
 	response, err = http.Get(testServer.URL + "/api/v1/verifications/" + evidence.ID)
@@ -255,6 +296,163 @@ func TestVerificationEvidenceIsPersistedAndNotMisrepresented(t *testing.T) {
 	}
 	if reopened.ID != evidence.ID || reopened.Provenance != "synthetic" {
 		t.Fatalf("persisted evidence changed: %#v", reopened)
+	}
+}
+
+type countingVerificationProvider struct {
+	calls atomic.Int32
+	delay time.Duration
+}
+
+func (provider *countingVerificationProvider) Name() string { return "counting-test-provider" }
+func (provider *countingVerificationProvider) Verify(ctx context.Context, request verification.Request) (verification.Evidence, error) {
+	provider.calls.Add(1)
+	return (verification.FakeProvider{Result: verification.Unknown, Delay: provider.delay}).Verify(ctx, request)
+}
+
+func TestVerificationIdempotencyReplaysEvidenceWithoutRepeatingProbe(t *testing.T) {
+	server := NewServer(config.Config{DataDir: filepath.Join(t.TempDir(), "pci.db"), MaxBody: 1 << 20})
+	defer func() { _ = server.Store.Close() }()
+	provider := &countingVerificationProvider{}
+	server.VerificationProvider = provider
+	allowTestVerification(server)
+
+	body := `{"sourceNamespace":"default","sourceWorkload":"api","destination":"db.example.test","protocol":"TCP","port":5432,"timeoutMillis":500}`
+	post := func(requestBody string) *httptest.ResponseRecorder {
+		request := httptest.NewRequest(http.MethodPost, "/api/v1/verifications", strings.NewReader(requestBody))
+		request.Header.Set("Content-Type", "application/json")
+		request.Header.Set("Idempotency-Key", "probe-attempt-01")
+		response := httptest.NewRecorder()
+		server.Handler().ServeHTTP(response, request)
+		return response
+	}
+
+	first := post(body)
+	var firstEvidence verification.Evidence
+	if first.Code != http.StatusOK || json.Unmarshal(first.Body.Bytes(), &firstEvidence) != nil {
+		t.Fatalf("first verification failed: status=%d body=%s", first.Code, first.Body.String())
+	}
+	retry := post(body)
+	var replayed verification.Evidence
+	if retry.Code != http.StatusOK || json.Unmarshal(retry.Body.Bytes(), &replayed) != nil {
+		t.Fatalf("idempotent retry failed: status=%d body=%s", retry.Code, retry.Body.String())
+	}
+	if firstEvidence.ID == "" || replayed.ID != firstEvidence.ID || provider.calls.Load() != 1 {
+		t.Fatalf("retry did not replay the original evidence: first=%#v retry=%#v calls=%d", firstEvidence, replayed, provider.calls.Load())
+	}
+
+	changedBody := strings.Replace(body, `"timeoutMillis":500`, `"timeoutMillis":501`, 1)
+	conflict := post(changedBody)
+	if conflict.Code != http.StatusConflict || !strings.Contains(conflict.Body.String(), "IDEMPOTENCY_KEY_CONFLICT") {
+		t.Fatalf("same key with different request must conflict: status=%d body=%s", conflict.Code, conflict.Body.String())
+	}
+	if provider.calls.Load() != 1 {
+		t.Fatalf("conflicting retry executed another probe: calls=%d", provider.calls.Load())
+	}
+}
+
+func TestVerificationCancellationBeforeExecutionDoesNotReserveKey(t *testing.T) {
+	server := NewServer(config.Config{DataDir: filepath.Join(t.TempDir(), "pci.db"), MaxBody: 1 << 20})
+	defer func() { _ = server.Store.Close() }()
+	provider := &countingVerificationProvider{}
+	server.VerificationProvider = provider
+	allowTestVerification(server)
+
+	body := `{"sourceNamespace":"default","sourceWorkload":"api","destination":"db.example.test","protocol":"TCP","port":5432,"timeoutMillis":500}`
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	request := httptest.NewRequest(http.MethodPost, "/api/v1/verifications", strings.NewReader(body)).WithContext(ctx)
+	request.Header.Set("Idempotency-Key", "cancelled-before-start")
+	response := httptest.NewRecorder()
+	server.Handler().ServeHTTP(response, request)
+	if response.Code != http.StatusRequestTimeout || provider.calls.Load() != 0 {
+		t.Fatalf("cancelled request executed: status=%d calls=%d body=%s", response.Code, provider.calls.Load(), response.Body.String())
+	}
+
+	retry := httptest.NewRequest(http.MethodPost, "/api/v1/verifications", strings.NewReader(body))
+	retry.Header.Set("Idempotency-Key", "cancelled-before-start")
+	retryResponse := httptest.NewRecorder()
+	server.Handler().ServeHTTP(retryResponse, retry)
+	if retryResponse.Code != http.StatusOK || provider.calls.Load() != 1 {
+		t.Fatalf("pre-execution cancellation incorrectly reserved idempotency key: status=%d calls=%d body=%s", retryResponse.Code, provider.calls.Load(), retryResponse.Body.String())
+	}
+}
+
+func TestVerificationPersistenceFailureIsVisibleAndNotRetried(t *testing.T) {
+	server := NewServer(config.Config{DataDir: filepath.Join(t.TempDir(), "pci.db"), MaxBody: 1 << 20})
+	defer func() { _ = server.Store.Close() }()
+	provider := &countingVerificationProvider{}
+	server.VerificationProvider = provider
+	allowTestVerification(server)
+	if _, err := server.Store.DB.Exec(`CREATE TRIGGER fail_verification_insert BEFORE INSERT ON verification_evidence BEGIN SELECT RAISE(ABORT, 'injected failure'); END`); err != nil {
+		t.Fatal(err)
+	}
+	body := `{"sourceNamespace":"default","sourceWorkload":"api","destination":"db.example.test","protocol":"TCP","port":5432,"timeoutMillis":500}`
+	post := func() *httptest.ResponseRecorder {
+		request := httptest.NewRequest(http.MethodPost, "/api/v1/verifications", strings.NewReader(body))
+		request.Header.Set("Idempotency-Key", "failed-persistence-attempt")
+		response := httptest.NewRecorder()
+		server.Handler().ServeHTTP(response, request)
+		return response
+	}
+	first := post()
+	if first.Code != http.StatusInternalServerError || !strings.Contains(first.Body.String(), "STORE_ERROR") {
+		t.Fatalf("persistence failure was not returned as an error: status=%d body=%s", first.Code, first.Body.String())
+	}
+	retry := post()
+	if retry.Code != http.StatusConflict || provider.calls.Load() != 1 {
+		t.Fatalf("ambiguous retry was repeated: status=%d calls=%d body=%s", retry.Code, provider.calls.Load(), retry.Body.String())
+	}
+	if evidence, err := server.Store.ListVerificationEvidence(10); err != nil || len(evidence) != 0 {
+		t.Fatalf("failed persistence created evidence: records=%v err=%v", evidence, err)
+	}
+}
+
+func TestMalformedPersistedVerificationIsAnAPIError(t *testing.T) {
+	server := NewServer(config.Config{DataDir: filepath.Join(t.TempDir(), "pci.db"), MaxBody: 1 << 20})
+	defer func() { _ = server.Store.Close() }()
+	if err := server.Store.SaveVerificationEvidence("bad-record", `{not-json`); err != nil {
+		t.Fatal(err)
+	}
+	for _, endpoint := range []string{"/api/v1/verifications/bad-record", "/api/v1/verifications"} {
+		request := httptest.NewRequest(http.MethodGet, endpoint, nil)
+		response := httptest.NewRecorder()
+		server.Handler().ServeHTTP(response, request)
+		if response.Code != http.StatusInternalServerError || !strings.Contains(response.Body.String(), "STORE_ERROR") {
+			t.Errorf("%s returned malformed evidence as success: status=%d body=%s", endpoint, response.Code, response.Body.String())
+		}
+	}
+}
+
+type invalidEvidenceProvider struct{}
+
+func (invalidEvidenceProvider) Name() string { return "invalid-evidence-provider" }
+func (invalidEvidenceProvider) Verify(context.Context, verification.Request) (verification.Evidence, error) {
+	return verification.Evidence{
+		AttemptedAt: time.Now().UTC(),
+		Duration:    time.Millisecond,
+		Outcome:     verification.Success,
+		Method:      "invalid-evidence-provider",
+		Limitations: []string{"synthetic"},
+	}, nil
+}
+
+func TestVerificationRejectsMissingProvenance(t *testing.T) {
+	server := NewServer(config.Config{DataDir: filepath.Join(t.TempDir(), "pci.db"), MaxBody: 1 << 20})
+	defer func() { _ = server.Store.Close() }()
+	server.VerificationProvider = invalidEvidenceProvider{}
+	allowTestVerification(server)
+	request := httptest.NewRequest(http.MethodPost, "/api/v1/verifications", strings.NewReader(
+		`{"sourceNamespace":"default","sourceWorkload":"api","destination":"db.example.test","protocol":"TCP","port":5432,"timeoutMillis":500}`,
+	))
+	response := httptest.NewRecorder()
+	server.Handler().ServeHTTP(response, request)
+	if response.Code != http.StatusBadGateway || !strings.Contains(response.Body.String(), "INVALID_PROVIDER_EVIDENCE") {
+		t.Fatalf("missing provenance was not rejected: status=%d body=%s", response.Code, response.Body.String())
+	}
+	evidence, err := server.Store.ListVerificationEvidence(10)
+	if err != nil || len(evidence) != 0 {
+		t.Fatalf("invalid evidence was persisted: records=%v err=%v", evidence, err)
 	}
 }
 
@@ -294,6 +492,83 @@ func (unauthorizedVerificationProvider) Verify(context.Context, verification.Req
 	return verification.Evidence{}, verification.ErrUnauthorized
 }
 
+func TestVerificationProviderTimeoutAfterReservationDoesNotRetry(t *testing.T) {
+	server := NewServer(config.Config{DataDir: filepath.Join(t.TempDir(), "pci.db"), MaxBody: 1 << 20})
+	defer func() { _ = server.Store.Close() }()
+	provider := &countingVerificationProvider{delay: 100 * time.Millisecond}
+	server.VerificationProvider = provider
+	allowTestVerification(server)
+
+	body := `{"sourceNamespace":"default","sourceWorkload":"api","destination":"db.example.test","protocol":"TCP","port":5432,"timeoutMillis":5}`
+	post := func() *httptest.ResponseRecorder {
+		request := httptest.NewRequest(http.MethodPost, "/api/v1/verifications", strings.NewReader(body))
+		request.Header.Set("Content-Type", "application/json")
+		request.Header.Set("Idempotency-Key", "timeout-after-reserve")
+		response := httptest.NewRecorder()
+		server.Handler().ServeHTTP(response, request)
+		return response
+	}
+
+	first := post()
+	if first.Code != http.StatusGatewayTimeout || provider.calls.Load() != 1 {
+		t.Fatalf("timeout after reservation: status=%d calls=%d body=%s", first.Code, provider.calls.Load(), first.Body.String())
+	}
+	retry := post()
+	if retry.Code != http.StatusConflict || !strings.Contains(retry.Body.String(), "VERIFICATION_IN_PROGRESS") || provider.calls.Load() != 1 {
+		t.Fatalf("provider timeout retry re-executed probe: status=%d calls=%d body=%s", retry.Code, provider.calls.Load(), retry.Body.String())
+	}
+}
+
+func TestConcurrentIdenticalIdempotencyKeysExecuteOnce(t *testing.T) {
+	server := NewServer(config.Config{DataDir: filepath.Join(t.TempDir(), "pci.db"), MaxBody: 1 << 20})
+	defer func() { _ = server.Store.Close() }()
+	provider := &countingVerificationProvider{delay: 25 * time.Millisecond}
+	server.VerificationProvider = provider
+	allowTestVerification(server)
+
+	const workers = 8
+	body := `{"sourceNamespace":"default","sourceWorkload":"api","destination":"db.example.test","protocol":"TCP","port":5432,"timeoutMillis":500}`
+	results := make(chan int, workers)
+	var start sync.WaitGroup
+	start.Add(1)
+	var running sync.WaitGroup
+	for range workers {
+		running.Add(1)
+		go func() {
+			defer running.Done()
+			start.Wait()
+			request := httptest.NewRequest(http.MethodPost, "/api/v1/verifications", strings.NewReader(body))
+			request.Header.Set("Content-Type", "application/json")
+			request.Header.Set("Idempotency-Key", "concurrent-identical-key")
+			response := httptest.NewRecorder()
+			server.Handler().ServeHTTP(response, request)
+			results <- response.Code
+		}()
+	}
+	start.Done()
+	running.Wait()
+	close(results)
+
+	okCount := 0
+	conflictCount := 0
+	for code := range results {
+		switch code {
+		case http.StatusOK:
+			okCount++
+		case http.StatusConflict:
+			conflictCount++
+		default:
+			t.Fatalf("unexpected concurrent status %d", code)
+		}
+	}
+	if provider.calls.Load() != 1 {
+		t.Fatalf("concurrent identical keys executed %d probes, want 1", provider.calls.Load())
+	}
+	if okCount < 1 || okCount+conflictCount != workers {
+		t.Fatalf("concurrent outcomes: ok=%d conflict=%d workers=%d", okCount, conflictCount, workers)
+	}
+}
+
 func TestVerificationAuthorizationAndTimeoutErrors(t *testing.T) {
 	server := NewServer(config.Config{DataDir: filepath.Join(t.TempDir(), "pci.db"), MaxBody: 1 << 20})
 	defer func() { _ = server.Store.Close() }()
@@ -323,6 +598,25 @@ func TestVerificationAuthorizationAndTimeoutErrors(t *testing.T) {
 	if response.StatusCode != http.StatusGatewayTimeout {
 		t.Fatalf("timeout status = %d, want %d", response.StatusCode, http.StatusGatewayTimeout)
 	}
+
+	provider := &countingVerificationProvider{}
+	server.VerificationProvider = provider
+	server.VerificationAuthorizer = deadlineAuthorizer{}
+	response, err = http.Post(testServer.URL+"/api/v1/verifications", "application/json", strings.NewReader(shortRequest))
+	if err != nil {
+		t.Fatalf("POST authorization-timeout verification: %v", err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusGatewayTimeout || provider.calls.Load() != 0 {
+		t.Fatalf("authorization timeout executed probe or returned wrong status: status=%d calls=%d", response.StatusCode, provider.calls.Load())
+	}
+}
+
+type deadlineAuthorizer struct{}
+
+func (deadlineAuthorizer) Authorize(ctx context.Context, _ verification.Request) error {
+	<-ctx.Done()
+	return ctx.Err()
 }
 
 func allowTestVerification(server *Server) {

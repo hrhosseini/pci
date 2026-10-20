@@ -1,5 +1,11 @@
 # Current State Audit
 
+> **Historical document.** This audit captured an early repository state (approximately Phases 1–5 / pre-Phase-6 baseline `62b483b`). It is retained for history and must not be read as the current product status.
+>
+> **Authoritative current status:** [IMPLEMENTATION_STATUS.md](./IMPLEMENTATION_STATUS.md), [SECURITY.md](./SECURITY.md), and the repository [README.md](../README.md).
+>
+> Notable differences since this audit was written: read-only Kubernetes discovery, endpoint connectivity modeling, API-backed React UI, SQLite evidence/idempotency persistence, verification contracts (runtime provider still disabled by default), and an opt-in disposable kind/Calico harness that has not been live-executed.
+
 ## Scope
 This audit reflects the code checked into the repository at the current point in the project lifecycle. It is intentionally conservative: it reports only behavior confirmed by reading source files and executing the relevant Go and frontend checks.
 

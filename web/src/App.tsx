@@ -58,10 +58,16 @@ type VerificationEvidence = {
   duration: number
   outcome: 'success' | 'failure' | 'timeout' | 'unknown'
   state: 'observed_success' | 'observed_failure' | 'unknown'
+  timeoutMillis?: number
   method: string
   errorClass?: string
   cluster?: string
   context?: string
+  cni?: string
+  analysisId?: string
+  snapshotId?: string
+  discoveryComplete?: boolean
+  discoveryCollectedAt?: string
   limitations: string[]
   provenance: string
   modelComparison: string
@@ -81,6 +87,18 @@ type AppState = {
   connected: boolean
   loading: boolean
   error: string | null
+}
+
+type LoadedDashboard = {
+  health: NonNullable<AppState['health']>
+  capabilities: NonNullable<AppState['capabilities']>
+  analysis: Analysis
+  diff: DiffReport
+  snapshots: Snapshot[]
+  report: Report
+  graph: Graph
+  verificationEvidence: VerificationEvidence[]
+  verificationEnabled: boolean
 }
 
 const initialState: AppState = {
@@ -161,63 +179,96 @@ spec:
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null)
 
   const loadData = useCallback(async () => {
-    setState((prev) => ({ ...prev, loading: true, error: null }))
-    try {
-      const health = await fetchJSON<{ ok: boolean; service?: string; version?: string; database?: { sqlite: boolean } }>(`${API_BASE}/health`)
-      const capabilities = await fetchJSON<{ capabilities?: string[]; status?: string; kubernetes?: { mode: string; status: string; offline: boolean; warnings?: string[] }; verification?: { enabled: boolean; provider?: string; runtimeProbeImplemented: boolean } }>(`${API_BASE}/capabilities`)
-      const analysesResponse = await fetchJSON<{ analyses: Array<{ id: string; kind: string; name?: string; path?: string; createdAt?: string }> }>(`${API_BASE}/analyses`)
-      const storedAnalyses = analysesResponse.analyses ?? []
-      let analysis: Analysis | null = null
-      if (storedAnalyses[0]) {
-        analysis = await fetchJSON<Analysis>(`${API_BASE}/analyses/${storedAnalyses[0].id}`)
-      }
-      if (!analysis) {
-        const created = await fetchJSON<Analysis>(`${API_BASE}/analyses`, {
-          method: 'POST',
-          body: JSON.stringify({ path: analysisPath }),
-        })
-        analysis = created
-      }
-      const graph = await fetchJSON<Graph>(`${API_BASE}/analyses/${analysis.id}/graph`)
-      await fetchJSON<{ findings: Finding[] }>(`${API_BASE}/analyses/${analysis.id}/findings`)
-      const diff = await fetchJSON<DiffReport>(`${API_BASE}/diff`, {
+    const health = await fetchJSON<{ ok: boolean; service?: string; version?: string; database?: { sqlite: boolean } }>(`${API_BASE}/health`)
+    const capabilities = await fetchJSON<{ capabilities?: string[]; status?: string; kubernetes?: { mode: string; status: string; offline: boolean; warnings?: string[] }; verification?: { enabled: boolean; provider?: string; runtimeProbeImplemented: boolean } }>(`${API_BASE}/capabilities`)
+    const analysesResponse = await fetchJSON<{ analyses: Array<{ id: string; kind: string; name?: string; path?: string; createdAt?: string }> }>(`${API_BASE}/analyses`)
+    const storedAnalyses = analysesResponse.analyses ?? []
+    let analysis: Analysis | null = null
+    if (storedAnalyses[0]) {
+      analysis = await fetchJSON<Analysis>(`${API_BASE}/analyses/${storedAnalyses[0].id}`)
+    }
+    if (!analysis) {
+      analysis = await fetchJSON<Analysis>(`${API_BASE}/analyses`, {
         method: 'POST',
-        body: JSON.stringify({ basePath: 'fixtures/base', proposedPath: 'fixtures/proposed' }),
+        body: JSON.stringify({ path: analysisPath }),
       })
-      const snapshotsResponse = await fetchJSON<{ snapshots: Array<{ id: string; name: string; path: string; createdAt: string }> }>(`${API_BASE}/snapshots`)
-      const snapshotDetails = await Promise.all(
-        snapshotsResponse.snapshots.slice(0, 5).map(async (snapshot) => fetchJSON<Snapshot>(`${API_BASE}/snapshots/${snapshot.id}`)),
-      )
-      const report = await fetchJSON<Report>(`${API_BASE}/reports`, {
-        method: 'POST',
-        body: JSON.stringify({ path: 'fixtures/base' }),
-      })
-      const verification = await fetchJSON<{ evidence: VerificationEvidence[]; verificationEnabled: boolean }>(`${API_BASE}/verifications`)
+    }
+    const graph = await fetchJSON<Graph>(`${API_BASE}/analyses/${analysis.id}/graph`)
+    await fetchJSON<{ findings: Finding[] }>(`${API_BASE}/analyses/${analysis.id}/findings`)
+    const diff = await fetchJSON<DiffReport>(`${API_BASE}/diff`, {
+      method: 'POST',
+      body: JSON.stringify({ basePath: 'fixtures/base', proposedPath: 'fixtures/proposed' }),
+    })
+    const snapshotsResponse = await fetchJSON<{ snapshots: Array<{ id: string; name: string; path: string; createdAt: string }> }>(`${API_BASE}/snapshots`)
+    const snapshots = await Promise.all(
+      snapshotsResponse.snapshots.slice(0, 5).map(async (snapshot) => fetchJSON<Snapshot>(`${API_BASE}/snapshots/${snapshot.id}`)),
+    )
+    const report = await fetchJSON<Report>(`${API_BASE}/reports`, {
+      method: 'POST',
+      body: JSON.stringify({ path: 'fixtures/base' }),
+    })
+    const verification = await fetchJSON<{ evidence: VerificationEvidence[]; verificationEnabled: boolean }>(`${API_BASE}/verifications`)
 
-      setState({
-        health,
-        capabilities,
-        analyses: [analysis],
-        diff,
-        snapshots: snapshotDetails,
-        report,
-        graph,
-        selectedFinding: null,
-        verificationEvidence: verification.evidence ?? [],
-        verificationEnabled: capabilities.verification?.enabled ?? verification.verificationEnabled,
-        connected: health.ok,
-        loading: false,
-        error: null,
-      })
-      setSelectedNodeId(graph.nodes[0]?.id ?? null)
-    } catch (error) {
-      setState((prev) => ({ ...prev, connected: false, loading: false, error: error instanceof Error ? error.message : 'request failed' }))
+    return {
+      health,
+      capabilities,
+      analysis,
+      diff,
+      snapshots,
+      report,
+      graph,
+      verificationEvidence: verification.evidence ?? [],
+      verificationEnabled: capabilities.verification?.enabled ?? verification.verificationEnabled,
     }
   }, [analysisPath])
 
+  const applyLoadedData = useCallback((data: LoadedDashboard) => {
+    setState({
+      health: data.health,
+      capabilities: data.capabilities,
+      analyses: [data.analysis],
+      diff: data.diff,
+      snapshots: data.snapshots,
+      report: data.report,
+      graph: data.graph,
+      selectedFinding: null,
+      verificationEvidence: data.verificationEvidence,
+      verificationEnabled: data.verificationEnabled,
+      connected: data.health.ok,
+      loading: false,
+      error: null,
+    })
+    setSelectedNodeId(data.graph.nodes[0]?.id ?? null)
+  }, [])
+
+  const applyLoadError = useCallback((error: unknown) => {
+    setState((prev) => ({
+      ...prev,
+      connected: false,
+      loading: false,
+      error: error instanceof Error ? error.message : 'request failed',
+    }))
+  }, [])
+
+  const refreshData = useCallback(() => {
+    setState((prev) => ({ ...prev, loading: true, error: null }))
+    void loadData().then(applyLoadedData, applyLoadError)
+  }, [applyLoadError, applyLoadedData, loadData])
+
   useEffect(() => {
-    void loadData()
-  }, [loadData])
+    let active = true
+    void loadData().then(
+      (data) => {
+        if (active) applyLoadedData(data)
+      },
+      (error: unknown) => {
+        if (active) applyLoadError(error)
+      },
+    )
+    return () => {
+      active = false
+    }
+  }, [applyLoadError, applyLoadedData, loadData])
 
   const currentAnalysis = state.analyses[0] ?? null
   const currentFindingList = currentAnalysis?.findings ?? []
@@ -290,7 +341,7 @@ spec:
           <p className="eyebrow">{state.health?.ok ? 'cluster: offline-ready' : 'cluster: disconnected'}</p>
           <h2>Change impact overview</h2>
         </div>
-        <button className="primary" onClick={() => void loadData()}>Refresh</button>
+        <button className="primary" onClick={refreshData}>Refresh</button>
       </header>
       <section className="metrics-grid">
         {summaryCards.map((card) => (
@@ -529,8 +580,10 @@ spec:
             <li key={evidence.id} className="list-item">
               <strong>{evidence.state} · {evidence.provenance}</strong>
               <span>{evidence.sourceNamespace}/{evidence.sourceWorkload} → {evidence.destination}:{evidence.port}/{evidence.protocol}</span>
-              <small>{evidence.method} · {new Date(evidence.attemptedAt).toLocaleString()} · {evidence.outcome} · {(evidence.duration / 1_000_000).toFixed(1)} ms</small>
-              {(evidence.cluster || evidence.context) && <small>Cluster/context: {[evidence.cluster, evidence.context].filter(Boolean).join(' / ')}</small>}
+              <small>{evidence.method} · {new Date(evidence.attemptedAt).toLocaleString()} · {evidence.outcome} · {(evidence.duration / 1_000_000).toFixed(1)} ms{evidence.timeoutMillis === undefined ? ' · timeout not recorded' : ` · timeout ${evidence.timeoutMillis} ms`}</small>
+              {(evidence.cluster || evidence.context || evidence.cni) && <small>Environment: {[evidence.cluster, evidence.context, evidence.cni].filter(Boolean).join(' / ')}</small>}
+              {(evidence.analysisId || evidence.snapshotId) && <small>Policy context: {[evidence.analysisId, evidence.snapshotId].filter(Boolean).join(' / ')}</small>}
+              {evidence.discoveryCollectedAt && <small>Discovery: {new Date(evidence.discoveryCollectedAt).toLocaleString()} · {evidence.discoveryComplete === undefined ? 'completeness unknown' : evidence.discoveryComplete ? 'complete' : 'incomplete'}</small>}
               <small>Model comparison: {evidence.modelComparison}. {evidence.limitations.join(' ')}</small>
               {evidence.errorClass && <small>Error classification: {evidence.errorClass}</small>}
             </li>
@@ -565,7 +618,7 @@ spec:
   )
 
   if (state.loading) return <div className="shell"><div className="panel">Loading PolicyChangeImpact…</div></div>
-  if (state.error) return <div className="shell"><div className="panel error-panel"><h3>Disconnected</h3><p>{state.error}</p><button className="primary" onClick={() => void loadData()}>Retry</button></div></div>
+  if (state.error) return <div className="shell"><div className="panel error-panel"><h3>Disconnected</h3><p>{state.error}</p><button className="primary" onClick={refreshData}>Retry</button></div></div>
 
   return (
     <div className="app-shell">

@@ -2,10 +2,14 @@ package api
 
 import (
 	"context"
+	"crypto/rand"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -80,6 +84,9 @@ func (s *Server) Handler() http.Handler {
 }
 
 func (s *Server) Serve(addr string, port int) error {
+	if err := validateListenAddress(addr); err != nil {
+		return err
+	}
 	httpServer := &http.Server{
 		Addr:              addr + ":" + strconv.Itoa(port),
 		Handler:           s.Handler(),
@@ -89,6 +96,36 @@ func (s *Server) Serve(addr string, port int) error {
 		IdleTimeout:       30 * time.Second,
 	}
 	return httpServer.ListenAndServe()
+}
+
+// validateListenAddress keeps the unauthenticated API on loopback by default.
+// An empty address would become ":port" and listen on all interfaces in Go.
+// Operators who intentionally expose a non-loopback bind must set
+// PCI_ALLOW_NON_LOOPBACK=1 (or "true") after reviewing SECURITY.md.
+func validateListenAddress(addr string) error {
+	if allowNonLoopbackBind() {
+		return nil
+	}
+	host := strings.TrimSpace(addr)
+	if host == "" {
+		return errors.New("refusing empty bind address (would listen on all interfaces); use 127.0.0.1 or ::1, or set PCI_ALLOW_NON_LOOPBACK=1 after reviewing that the API has no authentication")
+	}
+	if strings.EqualFold(host, "localhost") {
+		return nil
+	}
+	if strings.HasPrefix(host, "[") && strings.HasSuffix(host, "]") {
+		host = strings.TrimSuffix(strings.TrimPrefix(host, "["), "]")
+	}
+	ip := net.ParseIP(host)
+	if ip != nil && ip.IsLoopback() {
+		return nil
+	}
+	return fmt.Errorf("refusing non-loopback bind address %q for the unauthenticated API; use 127.0.0.1 or ::1, or set PCI_ALLOW_NON_LOOPBACK=1 after reviewing SECURITY.md", addr)
+}
+
+func allowNonLoopbackBind() bool {
+	value := strings.TrimSpace(os.Getenv("PCI_ALLOW_NON_LOOPBACK"))
+	return value == "1" || strings.EqualFold(value, "true")
 }
 
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
@@ -532,9 +569,14 @@ func (s *Server) handleVerifications(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusInternalServerError, "STORE_ERROR", "could not load verification evidence")
 			return
 		}
-		evidence := make([]json.RawMessage, 0, len(payloads))
+		evidence := make([]verification.Evidence, 0, len(payloads))
 		for _, payload := range payloads {
-			evidence = append(evidence, json.RawMessage(payload))
+			var item verification.Evidence
+			if err := json.Unmarshal([]byte(payload), &item); err != nil || !validPersistedEvidence(item, "") {
+				writeError(w, http.StatusInternalServerError, "STORE_ERROR", "stored verification evidence is malformed")
+				return
+			}
+			evidence = append(evidence, item)
 		}
 		writeJSON(w, map[string]any{"evidence": evidence, "verificationEnabled": s.verificationEnabled()})
 		return
@@ -565,9 +607,25 @@ func (s *Server) handleVerifications(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusServiceUnavailable, "PERSISTENCE_UNAVAILABLE", "verification evidence cannot be persisted; no probe was executed")
 		return
 	}
+	if req.AnalysisID != "" {
+		if _, err := s.loadAnalysis(req.AnalysisID); err != nil {
+			writeError(w, http.StatusNotFound, "ANALYSIS_NOT_FOUND", "the referenced analysis was not found")
+			return
+		}
+	}
+	if req.SnapshotID != "" {
+		if _, err := s.loadSnapshot(req.SnapshotID); err != nil {
+			writeError(w, http.StatusNotFound, "SNAPSHOT_NOT_FOUND", "the referenced snapshot was not found")
+			return
+		}
+	}
 	timeout := time.Duration(req.TimeoutMillis) * time.Millisecond
 	ctx, cancel := context.WithTimeout(r.Context(), timeout)
 	defer cancel()
+	if err := verificationContextError(ctx); err != nil {
+		writeVerificationContextError(w, err)
+		return
+	}
 	if err := s.VerificationAuthorizer.Authorize(ctx, req); err != nil {
 		if errors.Is(err, context.DeadlineExceeded) || errors.Is(ctx.Err(), context.DeadlineExceeded) {
 			writeError(w, http.StatusGatewayTimeout, "VERIFICATION_TIMEOUT", "verification authorization exceeded the requested timeout")
@@ -584,12 +642,59 @@ func (s *Server) handleVerifications(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusForbidden, "VERIFICATION_UNAUTHORIZED", "verification authorization failed")
 		return
 	}
+	if err := verificationContextError(ctx); err != nil {
+		writeVerificationContextError(w, err)
+		return
+	}
 	select {
 	case s.verificationSlots <- struct{}{}:
 		defer func() { <-s.verificationSlots }()
 	case <-ctx.Done():
-		writeError(w, http.StatusRequestTimeout, "VERIFICATION_TIMEOUT", "verification was cancelled before execution")
+		writeVerificationContextError(w, ctx.Err())
 		return
+	}
+	if err := verificationContextError(ctx); err != nil {
+		writeVerificationContextError(w, err)
+		return
+	}
+	idempotencyKey := r.Header.Get("Idempotency-Key")
+	requestHash := ""
+	if idempotencyKey != "" {
+		if len(idempotencyKey) > 128 || strings.TrimSpace(idempotencyKey) != idempotencyKey ||
+			strings.IndexFunc(idempotencyKey, func(r rune) bool { return r < 0x21 || r > 0x7e }) >= 0 {
+			writeError(w, http.StatusBadRequest, "INVALID_IDEMPOTENCY_KEY", "Idempotency-Key must be 1 to 128 visible ASCII characters without spaces")
+			return
+		}
+		encodedRequest, err := json.Marshal(req)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "ENCODING_ERROR", "could not encode verification request")
+			return
+		}
+		sum := sha256.Sum256(encodedRequest)
+		requestHash = hex.EncodeToString(sum[:])
+		reservation, err := s.Store.StartVerificationRequest(idempotencyKey, requestHash)
+		if errors.Is(err, storage.ErrIdempotencyConflict) {
+			writeError(w, http.StatusConflict, "IDEMPOTENCY_KEY_CONFLICT", "Idempotency-Key was already used for a different request")
+			return
+		}
+		if errors.Is(err, storage.ErrIdempotencyInProgress) {
+			writeError(w, http.StatusConflict, "VERIFICATION_IN_PROGRESS", "this verification request may already have executed and will not be repeated")
+			return
+		}
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "STORE_ERROR", "could not reserve verification request")
+			return
+		}
+		if reservation.Complete {
+			var saved verification.Evidence
+			if json.Unmarshal([]byte(reservation.Payload), &saved) != nil || !validPersistedEvidence(saved, "") {
+				writeError(w, http.StatusInternalServerError, "STORE_ERROR", "stored verification evidence is malformed")
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, reservation.Payload)
+			return
+		}
 	}
 	evidence, err := s.VerificationProvider.Verify(ctx, req)
 	if err != nil {
@@ -608,10 +713,6 @@ func (s *Server) handleVerifications(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadGateway, "VERIFICATION_PROVIDER_ERROR", "the verification provider failed; sensitive provider details were withheld")
 		return
 	}
-	if evidence.Provenance == "" {
-		writeError(w, http.StatusBadGateway, "INVALID_PROVIDER_EVIDENCE", "provider returned evidence without provenance")
-		return
-	}
 	evidence.ModelComparison = "not-evaluated"
 	evidence.State = stateForOutcome(evidence.Outcome)
 	if evidence.AttemptedAt.IsZero() {
@@ -626,17 +727,32 @@ func (s *Server) handleVerifications(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadGateway, "INVALID_PROVIDER_EVIDENCE", "provider returned an unsupported outcome")
 		return
 	}
-	evidence.ID = fmt.Sprintf("verification-%d", time.Now().UTC().UnixNano())
+	evidence.ID, err = newVerificationEvidenceID()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "ID_GENERATION_ERROR", "could not create verification evidence identifier")
+		return
+	}
 	evidence.SourceNamespace = req.SourceNamespace
 	evidence.SourceWorkload = req.SourceWorkload
 	evidence.Destination = req.Destination
 	evidence.Protocol = strings.ToUpper(req.Protocol)
 	evidence.Port = req.Port
+	evidence.TimeoutMillis = req.TimeoutMillis
+	evidence.AnalysisID = req.AnalysisID
+	evidence.SnapshotID = req.SnapshotID
 	if evidence.Method == "" {
 		evidence.Method = s.VerificationProvider.Name()
 	}
 	if len(evidence.Method) > 128 {
 		evidence.Method = s.VerificationProvider.Name()
+	}
+	if !validEvidenceText(evidence.Provenance, 128, false) ||
+		!validEvidenceText(evidence.Method, 128, false) ||
+		!validEvidenceText(evidence.Cluster, 256, true) ||
+		!validEvidenceText(evidence.Context, 256, true) ||
+		!validEvidenceText(evidence.CNI, 256, true) {
+		writeError(w, http.StatusBadGateway, "INVALID_PROVIDER_EVIDENCE", "provider returned invalid provenance or environment metadata")
+		return
 	}
 	if !safeErrorClass(evidence.ErrorClass) {
 		evidence.ErrorClass = "other"
@@ -647,9 +763,10 @@ func (s *Server) handleVerifications(w http.ResponseWriter, r *http.Request) {
 	if len(evidence.Limitations) > 16 {
 		evidence.Limitations = evidence.Limitations[:16]
 	}
-	for i, limitation := range evidence.Limitations {
-		if len(limitation) > 512 {
-			evidence.Limitations[i] = limitation[:512]
+	for _, limitation := range evidence.Limitations {
+		if !validEvidenceText(limitation, 512, false) {
+			writeError(w, http.StatusBadGateway, "INVALID_PROVIDER_EVIDENCE", "provider returned invalid evidence limitations")
+			return
 		}
 	}
 	encoded, err := json.Marshal(evidence)
@@ -658,7 +775,12 @@ func (s *Server) handleVerifications(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if s.Store != nil {
-		if err := s.Store.SaveVerificationEvidence(evidence.ID, string(encoded)); err != nil {
+		if idempotencyKey != "" {
+			err = s.Store.CompleteVerificationRequest(idempotencyKey, requestHash, evidence.ID, string(encoded))
+		} else {
+			err = s.Store.SaveVerificationEvidence(evidence.ID, string(encoded))
+		}
+		if err != nil {
 			writeError(w, http.StatusInternalServerError, "STORE_ERROR", "could not persist verification evidence")
 			return
 		}
@@ -681,8 +803,12 @@ func (s *Server) handleVerification(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "EVIDENCE_NOT_FOUND", "verification evidence was not found")
 		return
 	}
-	w.Header().Set("Content-Type", "application/json")
-	_, _ = io.WriteString(w, payload)
+	var evidence verification.Evidence
+	if err := json.Unmarshal([]byte(payload), &evidence); err != nil || !validPersistedEvidence(evidence, id) {
+		writeError(w, http.StatusInternalServerError, "STORE_ERROR", "stored verification evidence is malformed")
+		return
+	}
+	writeJSON(w, evidence)
 }
 
 func validVerificationOutcome(outcome verification.Outcome) bool {
@@ -692,6 +818,52 @@ func validVerificationOutcome(outcome verification.Outcome) bool {
 	default:
 		return false
 	}
+}
+
+func newVerificationEvidenceID() (string, error) {
+	random := make([]byte, 16)
+	if _, err := rand.Read(random); err != nil {
+		return "", err
+	}
+	return "verification-" + hex.EncodeToString(random), nil
+}
+
+func validEvidenceText(value string, max int, optional bool) bool {
+	if optional && value == "" {
+		return true
+	}
+	if value == "" || len(value) > max || strings.TrimSpace(value) != value {
+		return false
+	}
+	return strings.IndexFunc(value, func(r rune) bool { return r < 0x20 || r == 0x7f }) < 0
+}
+
+func verificationContextError(ctx context.Context) error {
+	if errors.Is(ctx.Err(), context.Canceled) || errors.Is(ctx.Err(), context.DeadlineExceeded) {
+		return ctx.Err()
+	}
+	return nil
+}
+
+func writeVerificationContextError(w http.ResponseWriter, err error) {
+	if errors.Is(err, context.DeadlineExceeded) {
+		writeError(w, http.StatusGatewayTimeout, "VERIFICATION_TIMEOUT", "verification exceeded the requested timeout")
+		return
+	}
+	writeError(w, http.StatusRequestTimeout, "VERIFICATION_CANCELLED", "verification was cancelled before execution")
+}
+
+func validPersistedEvidence(evidence verification.Evidence, expectedID string) bool {
+	return evidence.ID != "" &&
+		(expectedID == "" || evidence.ID == expectedID) &&
+		validVerificationOutcome(evidence.Outcome) &&
+		evidence.State == stateForOutcome(evidence.Outcome) &&
+		evidence.ModelComparison == "not-evaluated" &&
+		!evidence.AttemptedAt.IsZero() &&
+		evidence.TimeoutMillis >= 1 && evidence.TimeoutMillis <= 10000 &&
+		evidence.Duration >= 0 && evidence.Duration <= time.Duration(evidence.TimeoutMillis)*time.Millisecond &&
+		validEvidenceText(evidence.Provenance, 128, false) &&
+		validEvidenceText(evidence.Method, 128, false)
 }
 
 func verificationProviderName(provider verification.Provider) string {
