@@ -1,0 +1,19 @@
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: pci-phase6-ingress-port-mismatch
+  namespace: pci-phase6-destination
+  labels:
+    pci-phase6-owner: PCI_RUN_ID
+spec:
+  podSelector:
+    matchLabels: {app: server}
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels: {pci-phase6-role: source}
+          podSelector:
+            matchLabels: {role: client-a}
+      ports:
+        - {protocol: TCP, port: 81}

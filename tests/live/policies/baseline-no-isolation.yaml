@@ -1,0 +1,12 @@
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: pci-phase6-baseline-no-selection
+  namespace: pci-phase6-destination
+  labels:
+    pci-phase6-owner: PCI_RUN_ID
+spec:
+  podSelector:
+    matchLabels: {app: not-server}
+  policyTypes: [Ingress]
+  ingress: []
