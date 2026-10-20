@@ -10,10 +10,21 @@ paths:
   /health:
     get:
       operationId: healthCheck
-      summary: Health check
+      summary: Health check (liveness)
       responses:
         '200':
           description: Service health
+        '4XX':
+          $ref: '#/components/responses/ClientError'
+  /ready:
+    get:
+      operationId: readyCheck
+      summary: Readiness check (SQLite store available)
+      responses:
+        '200':
+          description: Service is ready to accept traffic
+        '503':
+          description: Not ready
         '4XX':
           $ref: '#/components/responses/ClientError'
   /version:
@@ -66,11 +77,26 @@ paths:
     get:
       operationId: discoverCluster
       summary: Discover namespaces, Pods, workloads, and NetworkPolicies without writes
+      description: >
+        Read-only discovery using the API process Kubernetes connection mode
+        (in-cluster ServiceAccount or kubeconfig). Query parameters can override
+        the process defaults for a single request. This endpoint never mutates
+        cluster state and never proves NetworkPolicy causation.
       parameters:
         - in: path
           name: clusterId
           required: true
           schema: {type: string}
+        - in: query
+          name: allNamespaces
+          required: false
+          schema: {type: string, enum: [true, false]}
+          description: When true, list resources across all namespaces
+        - in: query
+          name: namespace
+          required: false
+          schema: {type: string}
+          description: Limit discovery to one namespace (implies allNamespaces=false)
       responses:
         '200':
           description: Discovery result; `complete` is false when any requested resource collection failed or was unavailable

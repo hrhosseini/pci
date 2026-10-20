@@ -66,7 +66,9 @@ func NewServer(cfg config.Config) *Server {
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", s.handleHealth)
+	mux.HandleFunc("/readyz", s.handleReady)
 	mux.HandleFunc("/api/v1/health", s.handleHealth)
+	mux.HandleFunc("/api/v1/ready", s.handleReady)
 	mux.HandleFunc("/api/v1/version", s.handleVersion)
 	mux.HandleFunc("/api/v1/capabilities", s.handleCapabilities)
 	mux.HandleFunc("/api/v1/clusters/", s.handleCluster)
@@ -80,7 +82,10 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/api/v1/verifications", s.handleVerifications)
 	mux.HandleFunc("/api/v1/verifications/", s.handleVerification)
 	mux.HandleFunc("/api/v1/reports", s.handleReports)
-	return mux
+	if strings.TrimSpace(s.Config.StaticDir) == "" {
+		return mux
+	}
+	return s.withStaticUI(mux)
 }
 
 func (s *Server) Serve(addr string, port int) error {
@@ -101,7 +106,8 @@ func (s *Server) Serve(addr string, port int) error {
 // validateListenAddress keeps the unauthenticated API on loopback by default.
 // An empty address would become ":port" and listen on all interfaces in Go.
 // Operators who intentionally expose a non-loopback bind must set
-// PCI_ALLOW_NON_LOOPBACK=1 (or "true") after reviewing SECURITY.md.
+// PCI_ALLOW_NON_LOOPBACK=1 (or "true") after reviewing SECURITY.md, or run
+// inside Kubernetes where Service traffic requires a non-loopback bind.
 func validateListenAddress(addr string) error {
 	if allowNonLoopbackBind() {
 		return nil
@@ -124,12 +130,52 @@ func validateListenAddress(addr string) error {
 }
 
 func allowNonLoopbackBind() bool {
+	if config.InClusterEnvironment() {
+		return true
+	}
 	value := strings.TrimSpace(os.Getenv("PCI_ALLOW_NON_LOOPBACK"))
 	return value == "1" || strings.EqualFold(value, "true")
 }
 
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, map[string]any{"ok": true, "service": "pci", "version": "dev", "database": map[string]any{"sqlite": s.Store != nil}})
+}
+
+func (s *Server) handleReady(w http.ResponseWriter, r *http.Request) {
+	if s.Store == nil {
+		writeError(w, http.StatusServiceUnavailable, "NOT_READY", "sqlite store is not available")
+		return
+	}
+	writeJSON(w, map[string]any{"ok": true, "service": "pci", "ready": true, "database": map[string]any{"sqlite": true}})
+}
+
+// withStaticUI serves the built React SPA from StaticDir for non-API paths.
+func (s *Server) withStaticUI(api http.Handler) http.Handler {
+	root := filepath.Clean(s.Config.StaticDir)
+	fileServer := http.FileServer(http.Dir(root))
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		path := r.URL.Path
+		if path == "/healthz" || path == "/readyz" || strings.HasPrefix(path, "/api/") {
+			api.ServeHTTP(w, r)
+			return
+		}
+		candidate := filepath.Join(root, filepath.Clean("/"+path))
+		if !strings.HasPrefix(candidate, root) {
+			http.NotFound(w, r)
+			return
+		}
+		info, err := os.Stat(candidate)
+		if err == nil && !info.IsDir() {
+			fileServer.ServeHTTP(w, r)
+			return
+		}
+		index := filepath.Join(root, "index.html")
+		if _, err := os.Stat(index); err != nil {
+			http.NotFound(w, r)
+			return
+		}
+		http.ServeFile(w, r, index)
+	})
 }
 
 func (s *Server) handleVersion(w http.ResponseWriter, r *http.Request) {
@@ -140,14 +186,16 @@ func (s *Server) handleVersion(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleCapabilities(w http.ResponseWriter, r *http.Request) {
-	cfg, err := s.clusterConfig()
+	cfg, meta, err := s.clusterConfig()
+	kubeSettings := s.kubernetesSettings(meta, err)
 	if err != nil {
 		discovery := k8sdiscovery.CapabilityReport{Mode: "offline", Status: "not-configured", Offline: true, Warnings: []string{err.Error()}}
 		writeJSON(w, map[string]any{
-			"capabilities": []string{"offline-analysis", "semantic-diff", "graph", "snapshot", "verification-plan-validation", "kubernetes-read-only-discovery"},
-			"status":       "ready",
-			"kubernetes":   discovery,
-			"verification": map[string]any{"enabled": s.verificationEnabled(), "provider": verificationProviderName(s.VerificationProvider), "runtimeProbeImplemented": false},
+			"capabilities":       []string{"offline-analysis", "semantic-diff", "graph", "snapshot", "verification-plan-validation", "kubernetes-read-only-discovery"},
+			"status":             "ready",
+			"kubernetes":         discovery,
+			"kubernetesSettings": kubeSettings,
+			"verification":       map[string]any{"enabled": s.verificationEnabled(), "provider": verificationProviderName(s.VerificationProvider), "runtimeProbeImplemented": false},
 		})
 		return
 	}
@@ -155,11 +203,15 @@ func (s *Server) handleCapabilities(w http.ResponseWriter, r *http.Request) {
 	if capErr != nil && discovery.Status == "" {
 		discovery = k8sdiscovery.CapabilityReport{Mode: "offline", Status: "not-configured", Offline: true, Warnings: []string{capErr.Error()}}
 	}
+	if discovery.Context == "" {
+		discovery.Context = meta.Context
+	}
 	writeJSON(w, map[string]any{
-		"capabilities": []string{"offline-analysis", "semantic-diff", "graph", "snapshot", "verification-plan-validation", "kubernetes-read-only-discovery"},
-		"status":       "ready",
-		"kubernetes":   discovery,
-		"verification": map[string]any{"enabled": s.verificationEnabled(), "provider": verificationProviderName(s.VerificationProvider), "runtimeProbeImplemented": false},
+		"capabilities":       []string{"offline-analysis", "semantic-diff", "graph", "snapshot", "verification-plan-validation", "kubernetes-read-only-discovery"},
+		"status":             "ready",
+		"kubernetes":         discovery,
+		"kubernetesSettings": kubeSettings,
+		"verification":       map[string]any{"enabled": s.verificationEnabled(), "provider": verificationProviderName(s.VerificationProvider), "runtimeProbeImplemented": false},
 	})
 }
 
@@ -172,7 +224,7 @@ func (s *Server) handleCluster(w http.ResponseWriter, r *http.Request) {
 	}
 	clusterID := parts[0]
 	resp := map[string]any{"id": clusterID, "name": clusterID, "status": "offline-read-only", "complete": false, "capabilities": []string{"networkpolicy", "analysis", "reports", "read-only-discovery"}}
-	cfg, err := s.clusterConfig()
+	cfg, meta, err := s.clusterConfig()
 	if err != nil {
 		resp["warnings"] = []string{err.Error()}
 		resp["offline"] = true
@@ -182,6 +234,7 @@ func (s *Server) handleCluster(w http.ResponseWriter, r *http.Request) {
 		resp["collectedAt"] = time.Now().UTC().Format(time.RFC3339)
 		resp["namespace"] = s.Config.Namespace
 		resp["incomplete"] = []string{"cluster"}
+		resp["kubernetesSettings"] = s.kubernetesSettings(meta, err)
 		if len(parts) > 1 {
 			switch parts[1] {
 			case "pods":
@@ -207,26 +260,29 @@ func (s *Server) handleCluster(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadGateway, "CLUSTER_CLIENT_ERROR", clientErr.Error())
 		return
 	}
-	result, discoveryErr := k8sdiscovery.DiscoverReadOnly(r.Context(), client, k8sdiscovery.DiscoveryOptions{
-		Namespace:     s.Config.Namespace,
-		AllNamespaces: s.Config.AllNamespaces,
-		Context:       s.Config.KubeContext,
-		Timeout:       10 * time.Second,
-	})
+	discoveryOpts := s.discoveryOptionsFromRequest(r)
+	if discoveryOpts.Context == "" {
+		discoveryOpts.Context = meta.Context
+	}
+	result, discoveryErr := k8sdiscovery.DiscoverReadOnly(r.Context(), client, discoveryOpts)
+	if result.Context == "" {
+		result.Context = meta.Context
+	}
 	resp = map[string]any{
-		"id":           clusterID,
-		"name":         clusterID,
-		"mode":         result.Mode,
-		"status":       result.Status,
-		"offline":      result.Offline,
-		"complete":     result.Complete,
-		"collectedAt":  result.CollectedAt.Format(time.RFC3339),
-		"incomplete":   result.Incomplete,
-		"namespace":    result.Namespace,
-		"capabilities": []string{"networkpolicy", "analysis", "reports", "read-only-discovery", "namespace-scope"},
-		"warnings":     result.Warnings,
-		"errors":       result.Errors,
-		"cluster":      map[string]any{"host": cfg.Host, "context": s.Config.KubeContext, "namespace": s.Config.Namespace},
+		"id":                 clusterID,
+		"name":               clusterID,
+		"mode":               result.Mode,
+		"status":             result.Status,
+		"offline":            result.Offline,
+		"complete":           result.Complete,
+		"collectedAt":        result.CollectedAt.Format(time.RFC3339),
+		"incomplete":         result.Incomplete,
+		"namespace":          result.Namespace,
+		"capabilities":       []string{"networkpolicy", "analysis", "reports", "read-only-discovery", "namespace-scope"},
+		"warnings":           result.Warnings,
+		"errors":             result.Errors,
+		"kubernetesSettings": s.kubernetesSettings(meta, nil),
+		"cluster":            map[string]any{"host": cfg.Host, "context": meta.Context, "namespace": discoveryOpts.Namespace, "allNamespaces": discoveryOpts.AllNamespaces},
 	}
 	if len(parts) > 1 {
 		switch parts[1] {
@@ -269,12 +325,69 @@ func (s *Server) handleCluster(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, resp)
 }
 
-func (s *Server) clusterConfig() (*rest.Config, error) {
-	contextName := s.Config.KubeContext
+func (s *Server) clusterConfig() (*rest.Config, k8sdiscovery.ConfigMeta, error) {
+	contextName := strings.TrimSpace(s.Config.KubeContext)
 	if contextName == "" {
-		contextName = s.Config.Context
+		contextName = strings.TrimSpace(s.Config.Context)
 	}
-	return k8sdiscovery.LoadConfig(s.Config.KubeconfigPath, contextName)
+	mode := strings.TrimSpace(s.Config.KubeMode)
+	if mode == "" {
+		mode = config.KubeModeAuto
+	}
+	return k8sdiscovery.LoadConfigWithMode(mode, s.Config.KubeconfigPath, contextName)
+}
+
+func (s *Server) discoveryOptionsFromRequest(r *http.Request) k8sdiscovery.DiscoveryOptions {
+	opts := k8sdiscovery.DiscoveryOptions{
+		Namespace:     s.Config.Namespace,
+		AllNamespaces: s.Config.AllNamespaces,
+		Context:       strings.TrimSpace(s.Config.KubeContext),
+		Timeout:       10 * time.Second,
+	}
+	if opts.Context == "" {
+		opts.Context = strings.TrimSpace(s.Config.Context)
+	}
+	query := r.URL.Query()
+	if query.Get("allNamespaces") == "true" {
+		opts.AllNamespaces = true
+	}
+	if query.Get("allNamespaces") == "false" {
+		opts.AllNamespaces = false
+	}
+	if namespace := strings.TrimSpace(query.Get("namespace")); namespace != "" {
+		opts.Namespace = namespace
+		opts.AllNamespaces = false
+	}
+	return opts
+}
+
+func (s *Server) kubernetesSettings(meta k8sdiscovery.ConfigMeta, loadErr error) map[string]any {
+	mode := strings.TrimSpace(s.Config.KubeMode)
+	if mode == "" {
+		mode = config.KubeModeAuto
+	}
+	settings := map[string]any{
+		"mode":           mode,
+		"resolvedMode":   meta.Mode,
+		"source":         meta.Source,
+		"kubeconfigPath": s.Config.KubeconfigPath,
+		"context":        s.Config.KubeContext,
+		"namespace":      s.Config.Namespace,
+		"allNamespaces":  s.Config.AllNamespaces,
+		"configured":     loadErr == nil,
+		"readOnly":       true,
+		"inClusterEnv":   config.InClusterEnvironment(),
+	}
+	if meta.Path != "" {
+		settings["resolvedKubeconfigPath"] = meta.Path
+	}
+	if meta.Context != "" {
+		settings["resolvedContext"] = meta.Context
+	}
+	if loadErr != nil {
+		settings["error"] = loadErr.Error()
+	}
+	return settings
 }
 
 func (s *Server) handleAnalyses(w http.ResponseWriter, r *http.Request) {

@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -20,6 +21,7 @@ import (
 
 func TestValidateListenAddressRequiresLoopbackByDefault(t *testing.T) {
 	t.Setenv("PCI_ALLOW_NON_LOOPBACK", "")
+	t.Setenv("KUBERNETES_SERVICE_HOST", "")
 	if err := validateListenAddress("127.0.0.1"); err != nil {
 		t.Fatalf("loopback IPv4 should be allowed: %v", err)
 	}
@@ -38,6 +40,40 @@ func TestValidateListenAddressRequiresLoopbackByDefault(t *testing.T) {
 	t.Setenv("PCI_ALLOW_NON_LOOPBACK", "1")
 	if err := validateListenAddress("0.0.0.0"); err != nil {
 		t.Fatalf("override should allow non-loopback bind: %v", err)
+	}
+}
+
+func TestValidateListenAddressAllowsInClusterEnvironment(t *testing.T) {
+	t.Setenv("PCI_ALLOW_NON_LOOPBACK", "")
+	t.Setenv("KUBERNETES_SERVICE_HOST", "10.96.0.1")
+	if err := validateListenAddress("0.0.0.0"); err != nil {
+		t.Fatalf("in-cluster environment should allow Service bind: %v", err)
+	}
+}
+
+func TestReadyzAndStaticUI(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "pci.db")
+	uiDir := t.TempDir()
+	index := filepath.Join(uiDir, "index.html")
+	if err := os.WriteFile(index, []byte("<html>pci</html>"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	server := NewServer(config.Config{DataDir: dbPath, StaticDir: uiDir, MaxBody: 1 << 20})
+	testServer := httptest.NewServer(server.Handler())
+	defer testServer.Close()
+
+	ready := mustJSON[map[string]any](t, testServer.URL+"/readyz", http.MethodGet, nil)
+	if ready["ok"] != true {
+		t.Fatalf("readyz: %#v", ready)
+	}
+	resp, err := http.Get(testServer.URL + "/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK || !strings.Contains(string(body), "pci") {
+		t.Fatalf("static index: status=%d body=%q", resp.StatusCode, body)
 	}
 }
 
@@ -110,6 +146,32 @@ func TestClusterDiscoveryOfflineResponseIsExplicitAndEmpty(t *testing.T) {
 	}
 	if len(response["workloads"].([]any)) != 0 || len(response["networkPolicies"].([]any)) != 0 {
 		t.Fatalf("offline discovery must not invent resources: %#v", response)
+	}
+	settings, _ := response["kubernetesSettings"].(map[string]any)
+	if settings == nil || settings["configured"] != false {
+		t.Fatalf("offline discovery must report kubernetesSettings.configured=false: %#v", response)
+	}
+}
+
+func TestCapabilitiesIncludeKubernetesSettingsWhenKubeconfigMissing(t *testing.T) {
+	server := NewServer(config.Config{
+		DataDir:        filepath.Join(t.TempDir(), "pci.db"),
+		MaxBody:        1 << 20,
+		KubeconfigPath: filepath.Join(t.TempDir(), "missing-kubeconfig"),
+		KubeContext:    "kind-kind",
+	})
+	defer func() { _ = server.Store.Close() }()
+	testServer := httptest.NewServer(server.Handler())
+	defer testServer.Close()
+
+	response := mustJSON[map[string]any](t, testServer.URL+"/api/v1/capabilities", http.MethodGet, nil)
+	settings, _ := response["kubernetesSettings"].(map[string]any)
+	if settings == nil || settings["configured"] != false || settings["context"] != "kind-kind" {
+		t.Fatalf("capabilities must expose intended kube settings without fabricating cluster data: %#v", response)
+	}
+	kubernetes, _ := response["kubernetes"].(map[string]any)
+	if kubernetes["offline"] != true || kubernetes["status"] != "not-configured" {
+		t.Fatalf("capabilities must remain offline when kubeconfig is missing: %#v", response)
 	}
 }
 
