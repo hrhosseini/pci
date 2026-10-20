@@ -94,7 +94,26 @@ Render a report object from an analysis JSON file.
 Return a basic configuration and runtime readiness check.
 
 ### `pci serve`
-Run the local HTTP backend.
+Run the local HTTP backend used by the React UI. Persistent kubeconfig flags are honored (unlike earlier builds that reset to `config.Default()`).
+
+```bash
+# Use ~/.kube/config current-context (for example kind-kind when selected)
+pci serve --all-namespaces
+
+# Or pin kubeconfig + context explicitly
+pci serve --kubeconfig ~/.kube/config --kube-context kind-kind --all-namespaces
+```
+
+Environment equivalent for `pci-server`:
+
+```bash
+export PCI_KUBECONFIG=$HOME/.kube/config
+export PCI_KUBE_CONTEXT=kind-kind
+export PCI_ALL_NAMESPACES=true
+go run ./cmd/pci-server
+```
+
+Discovery remains read-only via `GET /api/v1/clusters/{id}/discover`.
 
 ### `pci version`
 Display version and available capabilities.

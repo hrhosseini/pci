@@ -2,6 +2,21 @@
 
 PolicyChangeImpact is structured as a Go monolith with clear internal boundaries instead of a distributed system. This keeps the analysis engine, API, CLI, and frontend aligned while preserving room for future CNI adapters or storage backends.
 
+Core analysis is offline-first. Optional **read-only discovery** attaches via kubeconfig (local) or an in-cluster ServiceAccount (Helm). Runtime verification is a separate, disabled-by-default boundary.
+
+## Kubernetes deployment
+
+```
+kubectl / Ingress → Service → Deployment (1 replica)
+                              ├─ pci-server (/api/v1 + static UI)
+                              ├─ ServiceAccount + read-only ClusterRole|Role
+                              └─ PVC → SQLite at /var/lib/pci/pci.db
+```
+
+- **Replicas:** keep at `1` while using SQLite; multi-writer HA is not supported.
+- **API auth:** none — protect with network controls or port-forward.
+- **Cluster auth:** in-cluster token by default; discovery never mutates resources.
+
 ## Layers
 
 ### CLI layer

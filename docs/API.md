@@ -5,9 +5,10 @@
 
 ## Implemented endpoints
 
-- `GET /api/v1/health` — health response
+- `GET /api/v1/health` and `GET /healthz` — liveness
+- `GET /api/v1/ready` and `GET /readyz` — readiness (SQLite available)
 - `GET /api/v1/version` — returns version and capabilities
-- `GET /api/v1/capabilities` — capability discovery
+- `GET /api/v1/capabilities` — capability discovery including `kubernetesSettings.mode` / `resolvedMode` (`in-cluster` | `kubeconfig`)
 - `GET /api/v1/clusters/{clusterId}` — cluster context metadata
 - `GET /api/v1/clusters/{clusterId}/pods` — read-only Pod discovery (requires cluster configuration)
 - `GET /api/v1/clusters/{clusterId}/network-policies` — read-only NetworkPolicy discovery (requires cluster configuration)

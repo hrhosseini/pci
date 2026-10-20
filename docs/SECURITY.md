@@ -9,7 +9,8 @@ The project currently operates in read-only offline analysis mode by default. Th
 - Server timeouts are configured for read operations.
 - Request JSON bodies are bounded (`MaxBody`, default 1 MiB).
 - The CLI emits machine-readable output to stdout and keeps diagnostics on stderr where appropriate.
-- The default server bind address is loopback (`127.0.0.1`). `Serve` refuses an empty address (which would become `:port` and listen on all interfaces) and refuses non-loopback addresses unless `PCI_ALLOW_NON_LOOPBACK=1` or `true` is set. This is a deployment guard for an unauthenticated API, not authentication.
+- The default server bind address is loopback (`127.0.0.1`). `Serve` refuses an empty address (which would become `:port` and listen on all interfaces) and refuses non-loopback addresses unless `PCI_ALLOW_NON_LOOPBACK=1` or `true` is set, or the process detects an in-cluster environment (`KUBERNETES_SERVICE_HOST`). This is a deployment guard for an unauthenticated API, not authentication.
+- Helm chart RBAC grants only `get`/`list`/`watch` on discovery resources. It never grants NetworkPolicy write verbs or `cluster-admin`.
 - The local SQLite store opens with a single connection and a 5-second busy timeout, creates its directory mode `0700`, and sets the database (and WAL/SHM sidecar) files to mode `0600` when present on platforms where `os.Chmod` enforces Unix permission bits. On Windows, these mode bits are best-effort and do not provide equivalent ACL secrecy; treat the DB path as sensitive regardless of OS. File modes are not a substitute for encrypting the filesystem or authenticating API callers.
 
 ## Missing or future protections
@@ -32,7 +33,26 @@ The project currently operates in read-only offline analysis mode by default. Th
 - Evidence is stored separately in SQLite with source identity, destination, protocol/port, timestamp, duration, outcome, method, provenance, and limitations.
 - Verification POST requests may supply an `Idempotency-Key`; completed retries with identical request content return the original persisted evidence, while conflicting content is rejected. A request reserved before provider execution is not automatically retried if its completion is ambiguous, preventing accidental duplicate probes. Use a new key only when intentionally initiating a new attempt.
 - Evidence IDs are random and collision-safe at the SQLite constraint boundary. Duplicate IDs fail rather than replacing prior evidence; malformed persisted evidence is returned as a structured server error instead of a success-shaped invalid JSON response.
-- Read-only discovery is explicitly scoped: namespace mode uses `get` on the selected Namespace and `list` on Pods, NetworkPolicies, Deployments, DaemonSets, StatefulSets, Jobs, and CronJobs in that namespace. All-namespaces mode additionally lists Namespaces and the same resource kinds cluster-wide. Discovery uses paginated reads and marks any failed collection incomplete. PCI does not currently ship an RBAC manifest; operators must grant only the applicable scoped read verbs and must not grant write verbs.
+- Read-only discovery is explicitly scoped: namespace mode uses `get` on the selected Namespace (when permitted) and `list` on Pods, NetworkPolicies, Deployments, DaemonSets, StatefulSets, Jobs, and CronJobs in that namespace. All-namespaces mode additionally lists Namespaces and the same resource kinds cluster-wide. Discovery uses paginated reads and marks any failed collection incomplete. The Helm chart under `charts/pci` ships the recommended read-only Role/ClusterRole; operators must not grant write verbs.
+
+## Kubernetes connection modes
+
+| Mode | When | Credentials |
+|------|------|-------------|
+| `auto` (default) | Explicit kubeconfig path → else in-cluster if `KUBERNETES_SERVICE_HOST` → else kubeconfig rules | Never logged |
+| `in-cluster` | Helm/Kubernetes deploy | Pod ServiceAccount token |
+| `kubeconfig` | Local development | `--kubeconfig` / `PCI_KUBECONFIG` + optional context |
+
+Precedence is deterministic. An explicit kubeconfig path never silently falls back to in-cluster on failure.
+
+## RBAC troubleshooting
+
+1. Confirm the Pod identity: `kubectl -n pci-system get pod -l app.kubernetes.io/name=pci -o jsonpath='{.items[0].spec.serviceAccountName}'`.
+2. Check bindings: `kubectl get clusterrolebinding,rolebinding -A | grep pci` (adjust release name).
+3. As the ServiceAccount (no writes): `kubectl auth can-i list networkpolicies --as=system:serviceaccount:pci-system:pci -A`.
+4. Permission denied on discovery returns API status `permission-denied` with warnings; empty inventories are returned only when the API call succeeds with zero items.
+5. Do not broaden to `cluster-admin`. Prefer `rbac.scope=cluster` with the chart’s read-only ClusterRole, or `rbac.scope=namespace` with `config.allNamespaces=false`.
+6. Never disable TLS verification to “fix” connectivity.
 
 ## Verification limitations
 The provider interface and deterministic synthetic provider exist for tests only. The synthetic provider is not installed by the server or CLI and always marks evidence as `provenance: synthetic`. There is no live workload execution adapter. In particular, PCI does not invoke `kubectl exec`, submit arbitrary commands, create probe Pods, or alter cluster resources. Configure no provider unless a future adapter has explicit authorization, read-only scope, output bounds, auditability, and cancellation tests.

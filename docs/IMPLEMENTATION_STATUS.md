@@ -6,6 +6,7 @@ PCI remains an offline-first NetworkPolicy analyzer with an API-backed UI and lo
 
 ## Implemented
 
+- [x] Kubernetes connection modes: `auto`, `in-cluster`, `kubeconfig` with deterministic precedence; Helm chart + Dockerfile for in-cluster deploy; `/readyz` and same-origin static UI serving; single-replica SQLite PVC guidance.
 - [x] Existing manifest analyzer, semantic policy diff, SQLite persistence, API, frontend, and read-only discovery retained.
 - [x] Per-flow ingress and egress evaluation with additive policy semantics and policyTypes defaulting.
 - [x] Pod selectors, selector expressions, namespace selectors, combined selectors, empty selectors, and namespace boundaries.
@@ -53,15 +54,25 @@ PCI remains an offline-first NetworkPolicy analyzer with an API-backed UI and lo
 
 ## Validation
 
+### Kubernetes-native productization (this change set)
+
+- `go test ./...` passed.
+- `go test -race ./...` passed.
+- `go vet ./...` passed.
+- `cd web && npm run lint` passed (pre-existing `react(set-state-in-effect)` warning in `App.tsx`).
+- `cd web && npm test` passed.
+- `cd web && npm run build` passed.
+- `helm lint ./charts/pci` passed.
+- `helm template pci ./charts/pci -n pci-system` rendered ClusterRole (read-only) + Deployment + PVC + Service.
+- Namespace-scoped RBAC template renders Roles; combining `rbac.scope=namespace` with `config.allNamespaces=true` correctly fails.
+- `docker build -t pci:0.1.0 .` passed (multi-stage UI + Go image).
+- No live Helm install or kind deploy was executed in this change set (image was built locally only).
+
+### Historical
+
 - Baseline before Phase 5 changes: `go test ./...` and `cd web && npm run build` passed.
-- Final tree: `go test ./...` passed.
-- Final tree: `go test -race ./...` passed.
-- Final tree: `go vet ./...` passed.
-- Final tree: `gofmt -l` check on all changed Go files returned no files.
-- Final tree: `cd web && npm run build` passed (TypeScript build and Vite production build).
-- Final tree: `api/openapi.yaml` parsed successfully as YAML; no OpenAPI schema validator was run.
 - CLI smoke test: `go run ./cmd/pci diff --base ./fixtures/base --proposed ./fixtures/proposed` succeeded and emitted modified policy fields plus exact before/after values.
-- No live Kubernetes cluster or CNI tests were run.
+- No live Kubernetes cluster or CNI tests were run as part of default CI.
 
 ### Phase 6 historical validation
 
