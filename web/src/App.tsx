@@ -132,6 +132,30 @@ function App() {
     try {
       const health = await api.getHealth(signal)
       const capabilities = await api.getCapabilities(signal)
+      const sampleBase = capabilities.samplePaths?.base || path
+      const sampleProposed = capabilities.samplePaths?.proposed || 'fixtures/proposed'
+      // Container images advertise absolute sample paths; switch off the local-dev default once.
+      if (
+        capabilities.samplePaths?.baseAvailable &&
+        capabilities.samplePaths.base &&
+        (path === 'fixtures/base' || path.startsWith('fixtures/'))
+      ) {
+        setWorkspacePath(capabilities.samplePaths.base)
+        setWorkspacePathDraft(capabilities.samplePaths.base)
+        setAnalysisPath(capabilities.samplePaths.base)
+        if (capabilities.samplePaths.proposed) {
+          setProposedPath(capabilities.samplePaths.proposed)
+        }
+        setData((prev) => ({
+          ...prev,
+          health,
+          capabilities,
+          apiConnected: Boolean(health.ok),
+          bootLoading: false,
+          verificationEnabled: Boolean(capabilities.verification?.enabled),
+        }))
+        return
+      }
       setData((prev) => ({
         ...prev,
         health,
@@ -143,18 +167,27 @@ function App() {
 
       const analysesResponse = await api.listAnalyses(signal)
       let analysis: Analysis | null = null
+      let analysisLoadError: string | null = null
       if (analysesResponse.analyses?.[0]?.id) {
         analysis = await api.getAnalysis(analysesResponse.analyses[0].id, signal)
       }
       if (!analysis) {
-        analysis = await api.createAnalysis({ path }, signal)
+        try {
+          analysis = await api.createAnalysis({ path: sampleBase }, signal)
+        } catch (analysisError) {
+          // In-cluster installs must not hard-fail the whole UI when sample manifests are missing.
+          analysisLoadError =
+            analysisError instanceof Error
+              ? analysisError.message
+              : 'Offline sample analysis is unavailable'
+        }
       }
 
       const [graph, snapshotsResponse, verification, diff] = await Promise.all([
-        analysis.id ? api.getGraph(analysis.id, signal) : Promise.resolve(null),
+        analysis?.id ? api.getGraph(analysis.id, signal) : Promise.resolve(null),
         api.listSnapshots(signal),
         api.listVerifications(signal),
-        api.postDiff(path, 'fixtures/proposed', signal).catch(() => null),
+        api.postDiff(sampleBase, sampleProposed, signal).catch(() => null),
       ])
 
       const snapshots = await Promise.all(
@@ -177,6 +210,7 @@ function App() {
         bootLoading: false,
         dataLoading: false,
         error: null,
+        actionError: analysisLoadError,
         selectedFinding: null,
       }))
       setSelectedNodeId(graph?.nodes[0]?.id ?? null)

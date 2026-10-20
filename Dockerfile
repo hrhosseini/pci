@@ -31,6 +31,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates
 COPY --from=go-build /out/pci /usr/local/bin/pci
 COPY --from=go-build /out/pci-server /usr/local/bin/pci-server
 COPY --from=web-build /src/web/dist /app/ui
+# Sample NetworkPolicy manifests for offline analysis in the UI (not live cluster data).
+COPY --from=go-build /src/fixtures /app/fixtures
 
 ENV PCI_ADDRESS=0.0.0.0 \
     PCI_PORT=8080 \
@@ -38,6 +40,8 @@ ENV PCI_ADDRESS=0.0.0.0 \
     PCI_ALL_NAMESPACES=true \
     PCI_STATIC_DIR=/app/ui \
     PCI_DATA_DIR=/var/lib/pci/pci.db \
+    PCI_SAMPLE_BASE=/app/fixtures/base \
+    PCI_SAMPLE_PROPOSED=/app/fixtures/proposed \
     PCI_ALLOW_NON_LOOPBACK=1
 
 USER pci:pci

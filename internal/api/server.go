@@ -188,11 +188,13 @@ func (s *Server) handleVersion(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleCapabilities(w http.ResponseWriter, r *http.Request) {
 	cfg, meta, err := s.clusterConfig()
 	kubeSettings := s.kubernetesSettings(meta, err)
+	samplePaths := s.samplePaths()
 	if err != nil {
 		discovery := k8sdiscovery.CapabilityReport{Mode: "offline", Status: "not-configured", Offline: true, Warnings: []string{err.Error()}}
 		writeJSON(w, map[string]any{
 			"capabilities":       []string{"offline-analysis", "semantic-diff", "graph", "snapshot", "verification-plan-validation", "kubernetes-read-only-discovery"},
 			"status":             "ready",
+			"samplePaths":        samplePaths,
 			"kubernetes":         discovery,
 			"kubernetesSettings": kubeSettings,
 			"verification":       map[string]any{"enabled": s.verificationEnabled(), "provider": verificationProviderName(s.VerificationProvider), "runtimeProbeImplemented": false},
@@ -209,10 +211,44 @@ func (s *Server) handleCapabilities(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, map[string]any{
 		"capabilities":       []string{"offline-analysis", "semantic-diff", "graph", "snapshot", "verification-plan-validation", "kubernetes-read-only-discovery"},
 		"status":             "ready",
+		"samplePaths":        samplePaths,
 		"kubernetes":         discovery,
 		"kubernetesSettings": kubeSettings,
 		"verification":       map[string]any{"enabled": s.verificationEnabled(), "provider": verificationProviderName(s.VerificationProvider), "runtimeProbeImplemented": false},
 	})
+}
+
+// samplePaths reports filesystem paths the UI should use for offline demo analysis.
+// Prefer configured values; fall back to the image-bundled fixtures when present.
+func (s *Server) samplePaths() map[string]any {
+	base := strings.TrimSpace(s.Config.SampleBasePath)
+	proposed := strings.TrimSpace(s.Config.SampleProposedPath)
+	if base == "" {
+		base = "fixtures/base"
+	}
+	if proposed == "" {
+		proposed = "fixtures/proposed"
+	}
+	if _, err := os.Stat("/app/fixtures/base"); err == nil && (base == "fixtures/base" || base == "") {
+		base = "/app/fixtures/base"
+	}
+	if _, err := os.Stat("/app/fixtures/proposed"); err == nil && (proposed == "fixtures/proposed" || proposed == "") {
+		proposed = "/app/fixtures/proposed"
+	}
+	baseAvailable := false
+	proposedAvailable := false
+	if _, err := os.Stat(base); err == nil {
+		baseAvailable = true
+	}
+	if _, err := os.Stat(proposed); err == nil {
+		proposedAvailable = true
+	}
+	return map[string]any{
+		"base":              base,
+		"proposed":          proposed,
+		"baseAvailable":     baseAvailable,
+		"proposedAvailable": proposedAvailable,
+	}
 }
 
 func (s *Server) handleCluster(w http.ResponseWriter, r *http.Request) {

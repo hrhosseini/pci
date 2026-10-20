@@ -9,7 +9,7 @@ replicaCount: 1
 
 image:
   repository: ghcr.io/hrhosseini/pci
-  tag: "0.1.0"
+  tag: "0.1.1"
   pullPolicy: IfNotPresent
 
 imagePullSecrets: []
@@ -90,6 +90,8 @@ config:
   namespace: default
   staticDir: /app/ui
   dataDir: /var/lib/pci/pci.db
+  sampleBase: /app/fixtures/base
+  sampleProposed: /app/fixtures/proposed
   allowNonLoopback: "1"
   # Optional overrides; leave empty for in-cluster ServiceAccount auth.
   kubeconfigPath: ""

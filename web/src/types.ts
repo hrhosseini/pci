@@ -148,6 +148,12 @@ export type KubernetesSettings = {
 export type CapabilitiesResponse = {
   capabilities?: string[]
   status?: string
+  samplePaths?: {
+    base?: string
+    proposed?: string
+    baseAvailable?: boolean
+    proposedAvailable?: boolean
+  }
   kubernetes?: {
     mode: string
     status: string

@@ -15,20 +15,22 @@ const (
 
 // Config contains CLI and service runtime settings.
 type Config struct {
-	Address        string
-	Port           int
-	Verbose        bool
-	Context        string
-	Namespace      string
-	KubeconfigPath string
-	KubeContext    string
-	KubeMode       string
-	AllNamespaces  bool
-	Output         string
-	Format         string
-	DataDir        string
-	StaticDir      string
-	MaxBody        int64
+	Address            string
+	Port               int
+	Verbose            bool
+	Context            string
+	Namespace          string
+	KubeconfigPath     string
+	KubeContext        string
+	KubeMode           string
+	AllNamespaces      bool
+	Output             string
+	Format             string
+	DataDir            string
+	StaticDir          string
+	SampleBasePath     string
+	SampleProposedPath string
+	MaxBody            int64
 }
 
 func Default() Config {
@@ -37,17 +39,19 @@ func Default() Config {
 		Port:    8080,
 		// Context / KubeContext default empty so client-go uses the kubeconfig current-context
 		// instead of forcing a non-existent context named "default".
-		Context:        "",
-		Namespace:      "default",
-		KubeconfigPath: "",
-		KubeContext:    "",
-		KubeMode:       KubeModeAuto,
-		AllNamespaces:  false,
-		Output:         "json",
-		Format:         "json",
-		DataDir:        "",
-		StaticDir:      "",
-		MaxBody:        1 << 20,
+		Context:            "",
+		Namespace:          "default",
+		KubeconfigPath:     "",
+		KubeContext:        "",
+		KubeMode:           KubeModeAuto,
+		AllNamespaces:      false,
+		Output:             "json",
+		Format:             "json",
+		DataDir:            "",
+		StaticDir:          "",
+		SampleBasePath:     "fixtures/base",
+		SampleProposedPath: "fixtures/proposed",
+		MaxBody:            1 << 20,
 	}
 }
 
@@ -110,6 +114,16 @@ func LoadFromEnv() Config {
 		cfg.StaticDir = val
 	} else if InClusterEnvironment() {
 		cfg.StaticDir = "/app/ui"
+	}
+	if val := os.Getenv("PCI_SAMPLE_BASE"); val != "" {
+		cfg.SampleBasePath = val
+	} else if InClusterEnvironment() {
+		cfg.SampleBasePath = "/app/fixtures/base"
+	}
+	if val := os.Getenv("PCI_SAMPLE_PROPOSED"); val != "" {
+		cfg.SampleProposedPath = val
+	} else if InClusterEnvironment() {
+		cfg.SampleProposedPath = "/app/fixtures/proposed"
 	}
 	if val := os.Getenv("PCI_MAX_BODY"); val != "" {
 		if n, err := strconv.ParseInt(val, 10, 64); err == nil && n > 0 {

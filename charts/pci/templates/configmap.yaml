@@ -12,6 +12,8 @@ data:
   PCI_NAMESPACE: {{ .Values.config.namespace | quote }}
   PCI_STATIC_DIR: {{ .Values.config.staticDir | quote }}
   PCI_DATA_DIR: {{ .Values.config.dataDir | quote }}
+  PCI_SAMPLE_BASE: {{ .Values.config.sampleBase | quote }}
+  PCI_SAMPLE_PROPOSED: {{ .Values.config.sampleProposed | quote }}
   PCI_ALLOW_NON_LOOPBACK: {{ .Values.config.allowNonLoopback | quote }}
   {{- if .Values.config.kubeconfigPath }}
   PCI_KUBECONFIG: {{ .Values.config.kubeconfigPath | quote }}
