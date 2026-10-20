@@ -1,27 +1,71 @@
+@import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap');
+
 :root {
-  font-family: Inter, 'Segoe UI', sans-serif;
+  --font-sans: 'IBM Plex Sans', 'Segoe UI', sans-serif;
+  --font-mono: 'IBM Plex Mono', ui-monospace, monospace;
+
+  --bg: #0b0d10;
+  --bg-elevated: #11141a;
+  --surface: #151922;
+  --surface-2: #1b2030;
+  --surface-hover: #222836;
+  --border: #2a3142;
+  --border-strong: #3a4458;
+  --text: #e8eaef;
+  --text-secondary: #a7b0c0;
+  --text-muted: #7d8799;
+  --accent: #3b82f6;
+  --accent-soft: rgba(59, 130, 246, 0.14);
+  --accent-border: rgba(59, 130, 246, 0.45);
+  --success: #3ecf8e;
+  --success-soft: rgba(62, 207, 142, 0.12);
+  --warning: #e8a838;
+  --warning-soft: rgba(232, 168, 56, 0.14);
+  --danger: #f07178;
+  --danger-soft: rgba(240, 113, 120, 0.14);
+  --radius-sm: 6px;
+  --radius: 10px;
+  --radius-lg: 14px;
+  --shadow: 0 1px 0 rgba(255, 255, 255, 0.03) inset, 0 8px 24px rgba(0, 0, 0, 0.28);
+  --focus: 0 0 0 2px var(--bg), 0 0 0 4px rgba(59, 130, 246, 0.55);
+  --sidebar-width: 248px;
+  --topbar-height: 56px;
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 24px;
+  --space-6: 32px;
+  --content-max: 1280px;
+
+  color-scheme: dark;
+  font-family: var(--font-sans);
   line-height: 1.5;
   font-weight: 400;
-  color: #e5ecff;
-  background: #0b1020;
+  color: var(--text);
+  background: var(--bg);
   font-synthesis: none;
   text-rendering: optimizeLegibility;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
 }
 
-* {
+*,
+*::before,
+*::after {
   box-sizing: border-box;
 }
 
-html, body, #root {
+html,
+body,
+#root {
   margin: 0;
   min-height: 100%;
   min-height: 100vh;
 }
 
 body {
-  background: #0b1020;
+  background: var(--bg);
 }
 
 button,
@@ -29,4 +73,13 @@ input,
 select,
 textarea {
   font: inherit;
+}
+
+:focus-visible {
+  outline: none;
+  box-shadow: var(--focus);
+}
+
+a {
+  color: var(--accent);
 }

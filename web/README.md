@@ -1,32 +1,31 @@
-# React + TypeScript + Vite
+# PCI Web UI
 
-This template provides a minimal setup to get React working in Vite with HMR and some Oxlint rules.
+React + TypeScript UI for PolicyChangeImpact.
 
-Currently, two official plugins are available:
+## Local development
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Oxc](https://oxc.rs)
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/)
+1. Start the API with Kubernetes discovery configured:
 
-## React Compiler
-
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
-
-## Expanding the Oxlint configuration
-
-If you are developing a production application, we recommend enabling type-aware lint rules by installing `oxlint-tsgolint` and editing `.oxlintrc.json`:
-
-```json
-{
-  "$schema": "./node_modules/oxlint/configuration_schema.json",
-  "plugins": ["react", "typescript", "oxc"],
-  "options": {
-    "typeAware": true
-  },
-  "rules": {
-    "react/rules-of-hooks": "error",
-    "react/only-export-components": ["warn", { "allowConstantExport": true }]
-  }
-}
+```bash
+# from repo root
+go run ./cmd/pci serve --kubeconfig ~/.kube/config --kube-context kind-kind --all-namespaces
 ```
 
-See the [Oxlint rules documentation](https://oxc.rs/docs/guide/usage/linter/rules) for the full list of rules and categories.
+2. Start Vite (proxies `/api` → `127.0.0.1:8080`):
+
+```bash
+npm install
+npm run dev
+```
+
+Dashboard auto-runs read-only discovery on load. **Discover / Refresh** re-fetches `GET /api/v1/clusters/local/discover`.
+
+## Production
+
+The container image embeds `web/dist` at `/app/ui`. `pci-server` serves the SPA and `/api/v1` on the same origin (Helm Service/Ingress). Do not use the Vite dev server in production.
+
+```bash
+npm run build   # outputs dist/
+npm test        # discovery status label checks
+npm run lint
+```
