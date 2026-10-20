@@ -9,3 +9,12 @@ paths = [
   '''(^|/)internal/.+_test\.go$''',
   '''(^|/)internal/config/kube_test\.go$''',
 ]
+
+[[allowlists]]
+description = "Fixed live-harness label names are not credentials"
+paths = [
+  '''(^|/)scripts/integration/.*\.sh$''',
+]
+regexes = [
+  '''pci-phase6-owner''',
+]

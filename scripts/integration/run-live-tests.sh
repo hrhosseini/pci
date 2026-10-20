@@ -9,7 +9,7 @@ readonly calico_version="v3.30.0"
 readonly kubectl_version="v1.32.2"
 readonly busybox_image="docker.io/library/busybox:1.36.1@sha256:73aaf090f3d85aa34ee199857f03fa3a95c8ede2ffd4cc2cdb5b94e566b11662"
 readonly nginx_image="docker.io/library/nginx:1.27.4-alpine@sha256:4ff102c5d78d254a6f0da062b3cf39eaf07f01eec0927fd21e219d0af8bc0591"
-readonly owner_key="pci-phase6-owner"
+readonly owner_label="pci-phase6-owner"
 readonly namespace_source="pci-phase6-source"
 readonly namespace_destination="pci-phase6-destination"
 readonly namespace_unrelated="pci-phase6-unrelated"
@@ -113,12 +113,12 @@ cleanup() {
     return
   fi
   for namespace in "$namespace_source" "$namespace_destination" "$namespace_unrelated"; do
-    if "${kubectl[@]}" get namespace "$namespace" -l "${owner_key}=${run_id}" -o name 2>/dev/null | grep -q .; then
+    if "${kubectl[@]}" get namespace "$namespace" -l "${owner_label}=${run_id}" -o name 2>/dev/null | grep -q .; then
       if ! assert_target; then
         echo "Target identity changed during cleanup; leaving remaining harness resources untouched." >&2
         break
       fi
-      if ! "${kubectl[@]}" delete namespace "$namespace" -l "${owner_key}=${run_id}" --wait=true --timeout=90s >/dev/null; then
+      if ! "${kubectl[@]}" delete namespace "$namespace" -l "${owner_label}=${run_id}" --wait=true --timeout=90s >/dev/null; then
         echo "Could not remove owned test namespace '$namespace'; inspect it manually." >&2
       fi
     fi
@@ -135,7 +135,7 @@ kind: Namespace
 metadata:
   name: ${namespace_source}
   labels:
-    ${owner_key}: ${run_id}
+    ${owner_label}: ${run_id}
     pci-phase6-role: source
 ---
 apiVersion: v1
@@ -143,7 +143,7 @@ kind: Namespace
 metadata:
   name: ${namespace_destination}
   labels:
-    ${owner_key}: ${run_id}
+    ${owner_label}: ${run_id}
     pci-phase6-role: destination
 ---
 apiVersion: v1
@@ -151,7 +151,7 @@ kind: Namespace
 metadata:
   name: ${namespace_unrelated}
   labels:
-    ${owner_key}: ${run_id}
+    ${owner_label}: ${run_id}
     pci-phase6-role: unrelated
 ---
 apiVersion: v1
