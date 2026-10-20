@@ -1,0 +1,189 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+
+permissions:
+  contents: write
+  packages: write
+  id-token: write
+  attestations: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: Publish image, chart, and GitHub Release
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout tag
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          fetch-depth: 0
+          ref: ${{ github.ref }}
+
+      - name: Parse version
+        id: ver
+        run: |
+          TAG="${GITHUB_REF_NAME}"
+          VERSION="${TAG#v}"
+          if [[ ! "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "Tag must be vMAJOR.MINOR.PATCH, got: $TAG" >&2
+            exit 1
+          fi
+          CHART_VERSION="$(awk '/^version:/ {print $2; exit}' charts/pci/Chart.yaml | tr -d '"')"
+          APP_VERSION="$(awk '/^appVersion:/ {print $2; exit}' charts/pci/Chart.yaml | tr -d '"')"
+          if [[ "$CHART_VERSION" != "$VERSION" || "$APP_VERSION" != "$VERSION" ]]; then
+            echo "Chart.yaml version ($CHART_VERSION) / appVersion ($APP_VERSION) must match tag $VERSION" >&2
+            exit 1
+          fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "image=ghcr.io/${{ github.repository_owner }}/pci" >> "$GITHUB_OUTPUT"
+          echo "owner=${{ github.repository_owner }}" >> "$GITHUB_OUTPUT"
+
+      - name: Set up Go
+        uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Install SQLite build deps
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libsqlite3-dev
+
+      - name: Go checks
+        run: |
+          go vet ./...
+          go test ./...
+          go test -race ./...
+
+      - name: Set up Node
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: Frontend checks
+        working-directory: web
+        run: |
+          npm ci
+          npm run lint
+          npm test
+          npm run build
+
+      - name: Set up Helm
+        uses: azure/setup-helm@1a275c3b69536ee54be43f2070a358922e12c8d4 # v4.3.1
+        with:
+          version: v3.17.3
+
+      - name: Helm checks
+        run: |
+          helm lint ./charts/pci
+          helm template pci ./charts/pci -n pci-system | tee /tmp/pci-manifests.yaml
+          grep -q "ghcr.io/${{ github.repository_owner }}/pci" /tmp/pci-manifests.yaml
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@29109295f81e9208d7d86ff1c6c12d2833863392 # v3.6.0
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@e468171a9de216ec08956ac3ada2f0791b6bd435 # v3.11.1
+
+      - name: Log in to GHCR
+        uses: docker/login-action@184bdaa0721073962dff0199f1fb9940f07167d1 # v3.5.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract Docker metadata
+        id: meta
+        uses: docker/metadata-action@902fa8ec7d6ecbf8d84d538b9b233a880e428804 # v5.7.0
+        with:
+          images: ${{ steps.ver.outputs.image }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.version=${{ steps.ver.outputs.version }}
+            org.opencontainers.image.title=pci
+          tags: |
+            type=semver,pattern={{version}},value=${{ steps.ver.outputs.version }}
+            type=semver,pattern={{major}}.{{minor}},value=${{ steps.ver.outputs.version }}
+            type=raw,value=latest,enable=true
+
+      - name: Build and push image
+        id: build
+        uses: docker/build-push-action@263435318d21b8e681c14492fe198d362a7d2c83 # v6.18.0
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          provenance: true
+          sbom: true
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Attest image
+        uses: actions/attest-build-provenance@db473fddc028af60658334401dc6fa3ffd8669fd # v2.3.0
+        with:
+          subject-name: ${{ steps.ver.outputs.image }}
+          subject-digest: ${{ steps.build.outputs.digest }}
+          push-to-registry: true
+
+      - name: Package and push Helm chart
+        run: |
+          set -euo pipefail
+          VERSION="${{ steps.ver.outputs.version }}"
+          OWNER="${{ steps.ver.outputs.owner }}"
+          helm package ./charts/pci --version "$VERSION" --app-version "$VERSION" --destination /tmp
+          echo "${{ secrets.GITHUB_TOKEN }}" | helm registry login ghcr.io -u "${{ github.actor }}" --password-stdin
+          helm push "/tmp/pci-${VERSION}.tgz" "oci://ghcr.io/${OWNER}/charts"
+
+      - name: Write release notes
+        env:
+          VERSION: ${{ steps.ver.outputs.version }}
+          OWNER: ${{ steps.ver.outputs.owner }}
+          REPO: ${{ github.repository }}
+        run: |
+          cat > /tmp/release-notes.md <<EOF
+          ## PolicyChangeImpact v${VERSION}
+
+          Offline-first Kubernetes NetworkPolicy analysis with optional in-cluster read-only discovery.
+
+          ### Install (public OCI)
+
+          \`\`\`bash
+          helm install pci oci://ghcr.io/${OWNER}/charts/pci \\
+            --version ${VERSION} \\
+            --namespace pci-system \\
+            --create-namespace
+          \`\`\`
+
+          ### Artifacts
+
+          - Container image: \`ghcr.io/${OWNER}/pci:${VERSION}\`
+          - Helm chart: \`oci://ghcr.io/${OWNER}/charts/pci\` version \`${VERSION}\`
+          - Repository: https://github.com/${REPO}
+
+          ### Notes
+
+          - The HTTP API has no authentication; expose only via trusted network controls or port-forward.
+          - SQLite persistence requires a single replica.
+          - Discovery is read-only; runtime probes and policy apply are not enabled in this release.
+          EOF
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@72f2c25fcb47643c292f7107632f7a47c1df5cd8 # v2.3.2
+        with:
+          tag_name: ${{ steps.ver.outputs.tag }}
+          name: v${{ steps.ver.outputs.version }}
+          body_path: /tmp/release-notes.md
+          draft: false
+          prerelease: false
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

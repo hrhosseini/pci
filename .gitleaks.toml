@@ -1,0 +1,11 @@
+title = "pci"
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Synthetic tokens in unit-test kubeconfig fixtures only"
+paths = [
+  '''(^|/)internal/.+_test\.go$''',
+  '''(^|/)internal/config/kube_test\.go$''',
+]
