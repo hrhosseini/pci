@@ -34,9 +34,12 @@ func main() {
 	rootCmd.PersistentFlags().StringVar(&cfg.Context, "context", cfg.Context, "Kubernetes context name")
 	rootCmd.PersistentFlags().StringVar(&cfg.KubeconfigPath, "kubeconfig", cfg.KubeconfigPath, "Path to kubeconfig file")
 	rootCmd.PersistentFlags().StringVar(&cfg.KubeContext, "kube-context", cfg.KubeContext, "Kubernetes context name")
+	rootCmd.PersistentFlags().StringVar(&cfg.KubeMode, "kube-mode", cfg.KubeMode, "Kubernetes connection mode: auto|in-cluster|kubeconfig")
 	rootCmd.PersistentFlags().StringVar(&cfg.Namespace, "namespace", cfg.Namespace, "Namespace filter")
 	rootCmd.PersistentFlags().BoolVar(&cfg.AllNamespaces, "all-namespaces", cfg.AllNamespaces, "Discover across all namespaces")
 	rootCmd.PersistentFlags().StringVar(&cfg.Address, "address", cfg.Address, "Bind address for local server operations")
+	rootCmd.PersistentFlags().StringVar(&cfg.DataDir, "data-dir", cfg.DataDir, "SQLite database file path")
+	rootCmd.PersistentFlags().StringVar(&cfg.StaticDir, "static-dir", cfg.StaticDir, "Directory of built web UI assets to serve")
 	rootCmd.PersistentFlags().BoolVarP(&cfg.Verbose, "verbose", "v", false, "Enable verbose logging")
 	rootCmd.PersistentFlags().Bool("no-color", false, "Disable colorized output")
 	rootCmd.PersistentFlags().String("config", "", "Path to configuration file")
@@ -386,16 +389,37 @@ func main() {
 	var serveCmd = &cobra.Command{
 		Use:   "serve",
 		Short: "Start the web backend",
+		Long: `Start the HTTP API used by the React UI.
+
+Kubernetes discovery is read-only. Connection mode precedence (--kube-mode / PCI_KUBE_MODE):
+  auto (default): explicit --kubeconfig → else in-cluster when KUBERNETES_SERVICE_HOST is set → else kubeconfig rules
+  in-cluster:     ServiceAccount token only (no kubeconfig)
+  kubeconfig:     explicit or default kubeconfig only
+
+Never logs tokens or certificate material. Set --static-dir to serve a production UI build.
+
+Example (local):
+  pci serve --kubeconfig ~/.kube/config --kube-context kind-kind --all-namespaces
+
+Example (in-cluster image):
+  pci-server  # PCI_KUBE_MODE=in-cluster PCI_STATIC_DIR=/app/ui`,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			cfg := config.Default()
-			if serveAddr == "" {
-				serveAddr = cfg.Address
+			// Use the root persistent cfg (flags) so kubeconfig/context/namespace reach the API.
+			serveCfg := cfg
+			if cmd.Flags().Changed("address") {
+				serveCfg.Address = serveAddr
+			} else if serveAddr != "" {
+				serveCfg.Address = serveAddr
 			}
-			if servePort == 0 {
-				servePort = cfg.Port
+			if cmd.Flags().Changed("port") {
+				serveCfg.Port = servePort
+			} else if servePort != 0 {
+				serveCfg.Port = servePort
 			}
-			fmt.Fprintf(cmd.OutOrStdout(), "Listening on %s:%d\n", serveAddr, servePort)
-			return api.NewServer(cfg).Serve(serveAddr, servePort)
+			fmt.Fprintf(cmd.OutOrStdout(), "Listening on %s:%d\n", serveCfg.Address, serveCfg.Port)
+			fmt.Fprintf(cmd.OutOrStdout(), "Kubernetes mode=%q kubeconfig=%q context=%q namespace=%q allNamespaces=%v staticDir=%q\n",
+				serveCfg.KubeMode, serveCfg.KubeconfigPath, serveCfg.KubeContext, serveCfg.Namespace, serveCfg.AllNamespaces, serveCfg.StaticDir)
+			return api.NewServer(serveCfg).Serve(serveCfg.Address, serveCfg.Port)
 		},
 	}
 	serveCmd.Flags().StringVar(&serveAddr, "address", "127.0.0.1", "Bind address")
@@ -405,7 +429,7 @@ func main() {
 		Use:   "discover",
 		Short: "Discover read-only cluster resources using the current kubeconfig",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			clusterCfg, err := k8sdiscovery.LoadConfig(cfg.KubeconfigPath, cfg.KubeContext)
+			clusterCfg, _, err := k8sdiscovery.LoadConfigWithMode(cfg.KubeMode, cfg.KubeconfigPath, cfg.KubeContext)
 			if err != nil {
 				return err
 			}

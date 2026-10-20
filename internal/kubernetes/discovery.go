@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"os"
 	"sort"
 	"strings"
 	"time"
@@ -18,8 +17,9 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
-	"k8s.io/client-go/tools/clientcmd"
 	"k8s.io/client-go/tools/pager"
+
+	"pci/internal/config"
 )
 
 // CapabilityReport describes the read-only discovery capabilities available to the app.
@@ -83,28 +83,35 @@ type DiscoveryResult struct {
 	Incomplete      []string                     `json:"incomplete,omitempty"`
 }
 
+// ConfigMeta describes which kubeconfig path and context were resolved for a client.
+type ConfigMeta struct {
+	Path    string `json:"path,omitempty"`
+	Context string `json:"context,omitempty"`
+	Mode    string `json:"mode,omitempty"`
+	Source  string `json:"source,omitempty"`
+}
+
+// LoadConfig builds a client-go rest.Config using auto mode precedence
+// (see config.LoadConfigWithMeta).
 func LoadConfig(kubeconfigPath, contextName string) (*rest.Config, error) {
-	path := strings.TrimSpace(kubeconfigPath)
-	if path == "" {
-		path = strings.TrimSpace(os.Getenv("KUBECONFIG"))
-	}
-	if path != "" {
-		rules := clientcmd.NewDefaultClientConfigLoadingRules()
-		rules.ExplicitPath = path
-		overrides := &clientcmd.ConfigOverrides{}
-		if strings.TrimSpace(contextName) != "" {
-			overrides.CurrentContext = strings.TrimSpace(contextName)
-		}
-		config, err := clientcmd.NewNonInteractiveDeferredLoadingClientConfig(rules, overrides).ClientConfig()
-		if err != nil {
-			return nil, fmt.Errorf("load kubeconfig %q: %w", path, err)
-		}
-		return config, nil
-	}
-	if config, err := rest.InClusterConfig(); err == nil {
-		return config, nil
-	}
-	return nil, errors.New("no Kubernetes configuration found; set KUBECONFIG, --kubeconfig, or use in-cluster config")
+	cfg, _, err := LoadConfigWithMeta(kubeconfigPath, contextName)
+	return cfg, err
+}
+
+// LoadConfigWithMeta is LoadConfig plus resolved path/context/mode metadata.
+func LoadConfigWithMeta(kubeconfigPath, contextName string) (*rest.Config, ConfigMeta, error) {
+	return LoadConfigWithMode(config.KubeModeAuto, kubeconfigPath, contextName)
+}
+
+// LoadConfigWithMode loads cluster config with an explicit connection mode.
+func LoadConfigWithMode(mode, kubeconfigPath, contextName string) (*rest.Config, ConfigMeta, error) {
+	cfg, meta, err := config.LoadConfigWithMeta(mode, kubeconfigPath, contextName)
+	return cfg, ConfigMeta{
+		Path:    meta.Path,
+		Context: meta.Context,
+		Mode:    meta.Mode,
+		Source:  meta.Source,
+	}, err
 }
 
 func DiscoverReadOnly(ctx context.Context, client kubernetes.Interface, opts DiscoveryOptions) (DiscoveryResult, error) {
@@ -136,7 +143,7 @@ func DiscoverReadOnly(ctx context.Context, client kubernetes.Interface, opts Dis
 		defer cancel()
 	}
 
-	if _, err := client.Discovery().ServerVersion(); err != nil {
+	if version, err := client.Discovery().ServerVersion(); err != nil {
 		result.Mode = "cluster"
 		result.Status = "unreachable"
 		if apierrors.IsForbidden(err) || apierrors.IsUnauthorized(err) {
@@ -152,6 +159,8 @@ func DiscoverReadOnly(ctx context.Context, client kubernetes.Interface, opts Dis
 			result.Warnings = append(result.Warnings, "The cluster API could not be reached.")
 		}
 		return result, err
+	} else if version != nil {
+		result.Cluster = strings.TrimSpace(version.GitVersion)
 	}
 
 	namespaceFilter := strings.TrimSpace(opts.Namespace)
@@ -195,16 +204,27 @@ func DiscoverReadOnly(ctx context.Context, client kubernetes.Interface, opts Dis
 		result.Namespace = namespaceFilter
 		namespace, err := client.CoreV1().Namespaces().Get(ctx, namespaceFilter, metav1.GetOptions{})
 		if err != nil {
-			result.Status = "namespace-unavailable"
+			// Namespace objects are cluster-scoped. Namespace-scoped Roles often cannot get them.
+			// Continue discovery for the requested name when list/get of namespaced resources may still work.
 			if apierrors.IsForbidden(err) || apierrors.IsUnauthorized(err) {
-				result.Status = "permission-denied"
+				result.Namespaces = []string{namespaceFilter}
+				result.Warnings = append(result.Warnings, fmt.Sprintf("Cannot read Namespace object %q (RBAC); continuing namespaced discovery without namespace labels.", namespaceFilter))
+				result.Errors = append(result.Errors, err.Error())
+			} else if apierrors.IsNotFound(err) {
+				result.Status = "namespace-unavailable"
+				result.Offline = true
+				markIncomplete(&result, "namespace", err)
+				return result, err
+			} else {
+				result.Status = "namespace-unavailable"
+				result.Offline = true
+				markIncomplete(&result, "namespace", err)
+				return result, err
 			}
-			result.Offline = true
-			markIncomplete(&result, "namespace", err)
-			return result, err
+		} else {
+			result.Namespaces = []string{namespace.Name}
+			result.NamespaceLabels[namespace.Name] = copyLabels(namespace.Labels)
 		}
-		result.Namespaces = []string{namespace.Name}
-		result.NamespaceLabels[namespace.Name] = copyLabels(namespace.Labels)
 	}
 
 	err = eachPage(ctx, func(options metav1.ListOptions) (runtime.Object, error) {

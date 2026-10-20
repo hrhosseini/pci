@@ -175,8 +175,9 @@ func TestReadOnlyCapabilityReportNilConfigReturnsOffline(t *testing.T) {
 	}
 }
 
-func TestLoadConfigUsesExplicitKubeconfigPath(t *testing.T) {
-	file := filepath.Join(t.TempDir(), "config")
+func writeDemoKubeconfig(t *testing.T, dir, currentContext string) string {
+	t.Helper()
+	file := filepath.Join(dir, "config")
 	contents := `apiVersion: v1
 kind: Config
 clusters:
@@ -188,7 +189,11 @@ contexts:
   context:
     cluster: local
     user: localuser
-current-context: localctx
+- name: otherctx
+  context:
+    cluster: local
+    user: localuser
+current-context: ` + currentContext + `
 users:
 - name: localuser
   user:
@@ -197,12 +202,58 @@ users:
 	if err := os.WriteFile(file, []byte(contents), 0o600); err != nil {
 		t.Fatalf("write kubeconfig: %v", err)
 	}
+	return file
+}
+
+func TestLoadConfigUsesExplicitKubeconfigPath(t *testing.T) {
+	file := writeDemoKubeconfig(t, t.TempDir(), "localctx")
 	cfg, err := LoadConfig(file, "")
 	if err != nil {
 		t.Fatalf("load config: %v", err)
 	}
 	if !strings.HasPrefix(cfg.Host, "https://") {
 		t.Fatalf("unexpected host: %q", cfg.Host)
+	}
+}
+
+func TestLoadConfigUsesKubeconfigEnvWithoutExplicitPath(t *testing.T) {
+	file := writeDemoKubeconfig(t, t.TempDir(), "localctx")
+	t.Setenv("KUBECONFIG", file)
+	cfg, meta, err := LoadConfigWithMeta("", "")
+	if err != nil {
+		t.Fatalf("load kubeconfig from env: %v", err)
+	}
+	if meta.Context != "localctx" {
+		t.Fatalf("expected current-context localctx, got %#v", meta)
+	}
+	if !strings.HasPrefix(cfg.Host, "https://") {
+		t.Fatalf("unexpected host: %q", cfg.Host)
+	}
+}
+
+func TestLoadConfigRejectsMissingExplicitKubeconfig(t *testing.T) {
+	_, err := LoadConfig(filepath.Join(t.TempDir(), "missing"), "")
+	if err == nil {
+		t.Fatal("expected missing kubeconfig error")
+	}
+}
+
+func TestLoadConfigRejectsInvalidContext(t *testing.T) {
+	file := writeDemoKubeconfig(t, t.TempDir(), "localctx")
+	_, err := LoadConfig(file, "does-not-exist")
+	if err == nil {
+		t.Fatal("expected invalid context error")
+	}
+}
+
+func TestLoadConfigWithMetaRespectsExplicitContext(t *testing.T) {
+	file := writeDemoKubeconfig(t, t.TempDir(), "localctx")
+	_, meta, err := LoadConfigWithMeta(file, "otherctx")
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	if meta.Context != "otherctx" || meta.Path != file {
+		t.Fatalf("unexpected meta: %#v", meta)
 	}
 }
 
