@@ -1,0 +1,13 @@
+.git
+.github
+**/*_test.go
+**/testdata
+web/node_modules
+web/dist
+charts
+docs
+*.md
+agent-transcripts
+.cursor
+tmp
+*.db

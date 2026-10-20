@@ -1,0 +1,16 @@
+apiVersion: v2
+name: pci
+description: PolicyChangeImpact — read-only Kubernetes NetworkPolicy analysis and discovery
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+keywords:
+  - networkpolicy
+  - kubernetes
+  - security
+  - analysis
+maintainers:
+  - name: pci
+home: https://github.com/hrhosseini/pci
+sources:
+  - https://github.com/hrhosseini/pci

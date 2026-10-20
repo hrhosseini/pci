@@ -1,0 +1,26 @@
+PolicyChangeImpact (PCI) has been installed.
+
+1. API and UI (same origin behind the Service):
+{{- if .Values.ingress.enabled }}
+   Open https://{{ (index .Values.ingress.hosts 0).host }}/ (or the configured Ingress host).
+{{- else }}
+   kubectl -n {{ .Release.Namespace }} port-forward svc/{{ include "pci.fullname" . }} 8080:{{ .Values.service.port }}
+   Then open http://127.0.0.1:8080/
+{{- end }}
+
+2. Connection mode: {{ .Values.config.kubeMode }}
+   RBAC scope: {{ .Values.rbac.scope }}
+   Discovery allNamespaces: {{ .Values.config.allNamespaces }}
+
+3. Health:
+   kubectl -n {{ .Release.Namespace }} get pods -l app.kubernetes.io/instance={{ .Release.Name }}
+   curl http://127.0.0.1:8080/healthz
+   curl http://127.0.0.1:8080/readyz
+
+4. Upgrade / rollback / uninstall:
+   helm upgrade {{ .Release.Name }} ./charts/pci -n {{ .Release.Namespace }}
+   helm rollback {{ .Release.Name }} -n {{ .Release.Namespace }}
+   helm uninstall {{ .Release.Name }} -n {{ .Release.Namespace }}
+
+SQLite is mounted at {{ .Values.config.dataDir }} (replicas must remain 1).
+PCI never applies or deletes NetworkPolicies; discovery is read-only.

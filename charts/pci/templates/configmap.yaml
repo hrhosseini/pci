@@ -1,0 +1,21 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "pci.fullname" . }}
+  labels:
+    {{- include "pci.labels" . | nindent 4 }}
+data:
+  PCI_ADDRESS: {{ .Values.config.address | quote }}
+  PCI_PORT: {{ .Values.config.port | quote }}
+  PCI_KUBE_MODE: {{ .Values.config.kubeMode | quote }}
+  PCI_ALL_NAMESPACES: {{ .Values.config.allNamespaces | ternary "true" "false" | quote }}
+  PCI_NAMESPACE: {{ .Values.config.namespace | quote }}
+  PCI_STATIC_DIR: {{ .Values.config.staticDir | quote }}
+  PCI_DATA_DIR: {{ .Values.config.dataDir | quote }}
+  PCI_ALLOW_NON_LOOPBACK: {{ .Values.config.allowNonLoopback | quote }}
+  {{- if .Values.config.kubeconfigPath }}
+  PCI_KUBECONFIG: {{ .Values.config.kubeconfigPath | quote }}
+  {{- end }}
+  {{- if .Values.config.kubeContext }}
+  PCI_KUBE_CONTEXT: {{ .Values.config.kubeContext | quote }}
+  {{- end }}
