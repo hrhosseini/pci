@@ -14,6 +14,7 @@ import {
 } from './components'
 import { NAV_ITEMS, severityTone } from './nav'
 import { discoveryStripLabel, summarizeDiscoveryError } from './discoveryStatus'
+import { buildDiscoveryGraph, type DiscoveryGraphNode } from './discoveryGraph'
 import type {
   Analysis,
   CapabilitiesResponse,
@@ -111,6 +112,7 @@ function App() {
   const [zoom, setZoom] = useState(1)
   const [pan, setPan] = useState({ x: 0, y: 0 })
   const [panning, setPanning] = useState(false)
+  const [graphSource, setGraphSource] = useState<'discovery' | 'analysis'>('discovery')
   const panOrigin = useRef<{ x: number; y: number; panX: number; panY: number } | null>(null)
   const abortRef = useRef<AbortController | null>(null)
 
@@ -278,10 +280,22 @@ function App() {
 
   const findings = data.analysis?.findings
   const policies = data.analysis?.policies
-  const namespaces = useMemo(
-    () => Array.from(new Set((policies ?? []).map((policy) => policy.namespace).filter(Boolean))).sort(),
-    [policies],
+  const namespaces = useMemo(() => {
+    const fromAnalysis = (policies ?? []).map((policy) => policy.namespace)
+    const fromDiscovery = [
+      ...(data.clusterDiscovery?.namespaces ?? []),
+      ...(data.clusterDiscovery?.networkPolicies ?? []).map((policy) => policy.namespace),
+    ]
+    return Array.from(new Set([...fromAnalysis, ...fromDiscovery].filter(Boolean))).sort()
+  }, [policies, data.clusterDiscovery])
+
+  const liveDiscoveryGraph = useMemo(
+    () => buildDiscoveryGraph(data.clusterDiscovery, { namespaceFilter }),
+    [data.clusterDiscovery, namespaceFilter],
   )
+
+  const hasLiveDiscoveryGraph =
+    Boolean(data.clusterDiscovery && !data.clusterDiscovery.offline) && liveDiscoveryGraph.nodes.length > 0
 
   const highFindings = (findings ?? []).filter((finding) =>
     ['high', 'critical'].includes((finding.severity || '').toLowerCase()),
@@ -315,9 +329,18 @@ function App() {
     })
   }, [policies, namespaceFilter, policyQuery])
 
+  const useDiscoveryTopology = graphSource === 'discovery' && hasLiveDiscoveryGraph
+
   const topologyNodes = useMemo(() => {
-    if (!data.graph?.nodes) return []
     const query = searchText.trim().toLowerCase()
+    if (useDiscoveryTopology) {
+      return liveDiscoveryGraph.nodes.filter((node) => {
+        const searchMatch =
+          !query || node.label.toLowerCase().includes(query) || node.id.toLowerCase().includes(query)
+        return searchMatch
+      })
+    }
+    if (!data.graph?.nodes) return []
     return data.graph.nodes.filter((node) => {
       const namespaceMatch = namespaceFilter === 'all' || node.id.includes(namespaceFilter)
       const searchMatch = !query || node.label.toLowerCase().includes(query) || node.id.toLowerCase().includes(query)
@@ -330,18 +353,35 @@ function App() {
         )
       return namespaceMatch && searchMatch && changedMatch
     })
-  }, [data.graph, data.diff, searchText, namespaceFilter, changedOnly])
+  }, [
+    useDiscoveryTopology,
+    liveDiscoveryGraph.nodes,
+    data.graph,
+    data.diff,
+    searchText,
+    namespaceFilter,
+    changedOnly,
+  ])
 
   const topologyEdges = useMemo(() => {
-    if (!data.graph?.edges) return []
     const ids = new Set(topologyNodes.map((node) => node.id))
+    if (useDiscoveryTopology) {
+      return liveDiscoveryGraph.edges.filter((edge) => ids.has(edge.source) && ids.has(edge.target))
+    }
+    if (!data.graph?.edges) return []
     return data.graph.edges.filter((edge) => ids.has(edge.source) || ids.has(edge.target))
-  }, [data.graph, topologyNodes])
+  }, [useDiscoveryTopology, liveDiscoveryGraph.edges, data.graph, topologyNodes])
 
   const selectedNode =
-    topologyNodes.find((node) => node.id === selectedNodeId) ??
-    data.graph?.nodes.find((node) => node.id === selectedNodeId) ??
+    (topologyNodes.find((node) => node.id === selectedNodeId) as DiscoveryGraphNode | undefined) ??
+    (data.graph?.nodes.find((node) => node.id === selectedNodeId) as DiscoveryGraphNode | undefined) ??
     null
+
+  const nodeById = useMemo(() => {
+    const map = new Map<string, DiscoveryGraphNode>()
+    for (const node of topologyNodes) map.set(node.id, node as DiscoveryGraphNode)
+    return map
+  }, [topologyNodes])
 
   const discovery = data.capabilities?.kubernetes
   const kubeSettings = data.capabilities?.kubernetesSettings
@@ -770,10 +810,50 @@ function App() {
 
               <section className="content-grid">
                 <Panel
-                  title="Modeled topology preview"
-                  meta={<Badge tone="info">modeled</Badge>}
+                  title="Policy topology preview"
+                  meta={
+                    <Badge tone={hasLiveDiscoveryGraph ? 'success' : 'info'}>
+                      {hasLiveDiscoveryGraph ? 'live discovery' : 'offline analysis'}
+                    </Badge>
+                  }
                 >
-                  {data.graph && data.graph.nodes.length > 0 ? (
+                  {hasLiveDiscoveryGraph ? (
+                    <svg
+                      viewBox="0 0 960 560"
+                      className="graph-canvas topology-stage preview"
+                      style={{ height: 260 }}
+                      aria-label="Discovery graph preview"
+                    >
+                      {liveDiscoveryGraph.edges.slice(0, 36).map((edge, index) => {
+                        const source = liveDiscoveryGraph.nodes.find((node) => node.id === edge.source)
+                        const target = liveDiscoveryGraph.nodes.find((node) => node.id === edge.target)
+                        if (!source || !target) return null
+                        const mx = ((source.x ?? 0) + (target.x ?? 0)) / 2
+                        const my = ((source.y ?? 0) + (target.y ?? 0)) / 2 - 20
+                        return (
+                          <path
+                            key={edge.id}
+                            d={`M ${source.x ?? 40} ${source.y ?? 40} Q ${mx} ${my} ${target.x ?? 200} ${target.y ?? 120}`}
+                            className={`edge flow ${edge.kind || 'selects'}`}
+                            style={{ animationDelay: `${index * 30}ms` }}
+                          />
+                        )
+                      })}
+                      {liveDiscoveryGraph.nodes.slice(0, 24).map((node, index) => (
+                        <g key={node.id} className="node-group" style={{ animationDelay: `${index * 40}ms` }}>
+                          <circle
+                            cx={node.x ?? 60}
+                            cy={node.y ?? 80}
+                            r={node.type === 'namespace' ? 22 : 16}
+                            className={`node ${node.type}`}
+                          />
+                          <text className="graph-label" x={node.x ?? 60} y={(node.y ?? 80) + 28} textAnchor="middle">
+                            {node.label}
+                          </text>
+                        </g>
+                      ))}
+                    </svg>
+                  ) : data.graph && data.graph.nodes.length > 0 ? (
                     <svg viewBox="0 0 420 220" className="graph-canvas" style={{ height: 240 }} aria-label="Network graph preview">
                       {data.graph.edges.map((edge) => {
                         const source = data.graph?.nodes.find((node) => node.id === edge.source)
@@ -811,16 +891,22 @@ function App() {
                   ) : (
                     <EmptyState
                       title="No graph yet"
-                      body="Run an analysis from Policies or refresh with a valid manifest path."
+                      body="Run Discover after applying NetworkPolicies to render a live policy topology."
                       action={
-                        <Button variant="secondary" onClick={() => setRoute('policies')}>
-                          Open policies
+                        <Button variant="secondary" onClick={() => void runClusterDiscover()}>
+                          Discover cluster
                         </Button>
                       }
                     />
                   )}
                   <div className="page-actions" style={{ marginTop: 12 }}>
-                    <Button variant="secondary" onClick={() => setRoute('topology')}>
+                    <Button
+                      variant="secondary"
+                      onClick={() => {
+                        setGraphSource(hasLiveDiscoveryGraph ? 'discovery' : 'analysis')
+                        setRoute('topology')
+                      }}
+                    >
                       Open topology
                     </Button>
                     <Button variant="secondary" onClick={() => setRoute('comparison')}>
@@ -893,24 +979,56 @@ function App() {
 
           {route === 'topology' && (
             <div className="stacked-grid">
-              <Panel title="Topology" meta={<Badge tone="info">modeled graph</Badge>}>
+              <Panel
+                title="Topology"
+                meta={
+                  <Badge tone={useDiscoveryTopology ? 'success' : 'info'}>
+                    {useDiscoveryTopology ? 'live discovery graph' : 'offline analysis graph'}
+                  </Badge>
+                }
+              >
                 <div className="toolbar">
+                  <div className="segmented" role="group" aria-label="Graph source">
+                    <button
+                      type="button"
+                      className={graphSource === 'discovery' ? 'active' : ''}
+                      onClick={() => setGraphSource('discovery')}
+                      disabled={!hasLiveDiscoveryGraph}
+                      title={hasLiveDiscoveryGraph ? 'Graph from discovered NetworkPolicies' : 'Run Discover first'}
+                    >
+                      Live discovery
+                    </button>
+                    <button
+                      type="button"
+                      className={graphSource === 'analysis' ? 'active' : ''}
+                      onClick={() => setGraphSource('analysis')}
+                    >
+                      Offline analysis
+                    </button>
+                  </div>
                   <input value={searchText} onChange={(event) => setSearchText(event.target.value)} placeholder="Search nodes" aria-label="Search nodes" />
                   <select value={namespaceFilter} onChange={(event) => setNamespaceFilter(event.target.value)} aria-label="Namespace filter">
-                    <option value="all">All namespaces</option>
+                    <option value="all">Policy namespaces</option>
                     {namespaces.map((namespace) => (
                       <option key={namespace} value={namespace}>
                         {namespace}
                       </option>
                     ))}
                   </select>
-                  <label className="checkbox-row">
-                    <input type="checkbox" checked={changedOnly} onChange={(event) => setChangedOnly(event.target.checked)} />
-                    Changed only
-                  </label>
+                  {!useDiscoveryTopology && (
+                    <label className="checkbox-row">
+                      <input type="checkbox" checked={changedOnly} onChange={(event) => setChangedOnly(event.target.checked)} />
+                      Changed only
+                    </label>
+                  )}
+                  {hasLiveDiscoveryGraph && (
+                    <Button variant="secondary" onClick={() => void runClusterDiscover()} disabled={data.discoveryLoading}>
+                      {data.discoveryLoading ? 'Refreshing…' : 'Refresh discovery'}
+                    </Button>
+                  )}
                 </div>
                 <div
-                  className={`graph-canvas ${panning ? 'panning' : ''}`}
+                  className={`graph-canvas topology-stage ${panning ? 'panning' : ''}`}
                   onPointerDown={onGraphPointerDown}
                   onPointerMove={onGraphPointerMove}
                   onPointerUp={onGraphPointerUp}
@@ -927,52 +1045,103 @@ function App() {
                       Fit
                     </Button>
                   </div>
-                  <svg viewBox="0 0 480 320" aria-label="Topology graph">
-                    <g transform={`translate(${pan.x} ${pan.y}) scale(${zoom})`}>
-                      {topologyEdges.map((edge) => {
-                        const source = data.graph?.nodes.find((node) => node.id === edge.source)
-                        const target = data.graph?.nodes.find((node) => node.id === edge.target)
-                        if (!source || !target) return null
-                        return (
-                          <line
-                            key={edge.id}
-                            x1={source.x ?? 80}
-                            y1={source.y ?? 80}
-                            x2={target.x ?? 280}
-                            y2={target.y ?? 160}
-                            className="edge"
-                          />
-                        )
-                      })}
-                      {topologyNodes.map((node, index) => {
-                        const cx = node.x ?? 80 + (index % 4) * 110
-                        const cy = node.y ?? 70 + Math.floor(index / 4) * 90
-                        return (
-                          <g key={node.id} onClick={() => setSelectedNodeId(node.id)} style={{ cursor: 'pointer' }}>
-                            <circle
-                              cx={cx}
-                              cy={cy}
-                              r={node.type === 'cluster' ? 26 : 20}
-                              className={`node ${node.type} ${selectedNodeId === node.id ? 'selected' : ''}`}
-                            />
-                            <text className="graph-label" x={cx - 16} y={cy + 4}>
-                              {node.label}
-                            </text>
-                          </g>
-                        )
-                      })}
-                    </g>
-                  </svg>
+                  {topologyNodes.length === 0 ? (
+                    <div className="topology-empty">
+                      <EmptyState
+                        title={useDiscoveryTopology ? 'No discovery graph yet' : 'No analysis graph'}
+                        body={
+                          useDiscoveryTopology
+                            ? 'Run Discover after applying NetworkPolicies. The live graph focuses on namespaces that contain policies.'
+                            : 'Run an offline analysis, or switch to Live discovery.'
+                        }
+                      />
+                    </div>
+                  ) : (
+                    <svg viewBox="0 0 960 560" aria-label="Topology graph" className="topology-svg">
+                      <defs>
+                        <marker id="arrow-allows" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+                          <path d="M 0 0 L 10 5 L 0 10 z" className="edge-marker allows" />
+                        </marker>
+                        <marker id="arrow-isolates" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+                          <path d="M 0 0 L 10 5 L 0 10 z" className="edge-marker isolates" />
+                        </marker>
+                        <marker id="arrow-egress" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+                          <path d="M 0 0 L 10 5 L 0 10 z" className="edge-marker egress" />
+                        </marker>
+                        <marker id="arrow-selects" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+                          <path d="M 0 0 L 10 5 L 0 10 z" className="edge-marker selects" />
+                        </marker>
+                      </defs>
+                      <g transform={`translate(${pan.x} ${pan.y}) scale(${zoom})`}>
+                        {topologyEdges.map((edge, index) => {
+                          const source = nodeById.get(edge.source)
+                          const target = nodeById.get(edge.target)
+                          if (!source || !target) return null
+                          const kind = 'kind' in edge ? edge.kind : undefined
+                          const x1 = source.x ?? 80
+                          const y1 = source.y ?? 80
+                          const x2 = target.x ?? 280
+                          const y2 = target.y ?? 160
+                          const mx = (x1 + x2) / 2
+                          const my = (y1 + y2) / 2 - 18
+                          return (
+                            <g key={edge.id} className="edge-group" style={{ animationDelay: `${index * 40}ms` }}>
+                              <path
+                                d={`M ${x1} ${y1} Q ${mx} ${my} ${x2} ${y2}`}
+                                className={`edge flow ${kind || 'selects'}`}
+                                markerEnd={`url(#arrow-${kind || 'selects'})`}
+                              />
+                              {edge.label && (
+                                <text className="edge-label" x={mx} y={my - 4}>
+                                  {edge.label}
+                                </text>
+                              )}
+                            </g>
+                          )
+                        })}
+                        {topologyNodes.map((node, index) => {
+                          const cx = node.x ?? 80 + (index % 4) * 110
+                          const cy = node.y ?? 70 + Math.floor(index / 4) * 90
+                          const radius = node.type === 'namespace' ? 28 : node.type === 'policy' ? 22 : 18
+                          return (
+                            <g
+                              key={node.id}
+                              className="node-group"
+                              style={{ animationDelay: `${80 + index * 35}ms` }}
+                              onClick={() => setSelectedNodeId(node.id)}
+                            >
+                              <circle
+                                cx={cx}
+                                cy={cy}
+                                r={radius + 6}
+                                className={`node-halo ${node.type} ${selectedNodeId === node.id ? 'selected' : ''}`}
+                              />
+                              <circle
+                                cx={cx}
+                                cy={cy}
+                                r={radius}
+                                className={`node ${node.type} ${selectedNodeId === node.id ? 'selected' : ''}`}
+                              />
+                              <text className="graph-label" x={cx} y={cy + radius + 16} textAnchor="middle">
+                                {node.label}
+                              </text>
+                            </g>
+                          )
+                        })}
+                      </g>
+                    </svg>
+                  )}
                 </div>
                 <div className="legend" aria-label="Legend">
-                  <span><i className="cluster" />Cluster</span>
+                  <span><i className="namespace" />Namespace</span>
                   <span><i className="policy" />Policy</span>
                   <span><i className="workload" />Workload</span>
-                  <span><i className="namespace" />Namespace</span>
+                  <span className="legend-edge allows">allows / selects</span>
+                  <span className="legend-edge isolates">isolates</span>
                 </div>
-                <div className="list-stack" style={{ marginTop: 12 }}>
+                <div className="list-stack topology-node-list">
                   {topologyNodes.length === 0 ? (
-                    <EmptyState title="No matching nodes" body="Adjust filters or run an analysis that produces a graph." />
+                    <EmptyState title="No matching nodes" body="Adjust filters or refresh discovery." />
                   ) : (
                     topologyNodes.map((node) => (
                       <button
@@ -994,19 +1163,30 @@ function App() {
                     <h4>{selectedNode.label}</h4>
                     <p><strong>ID:</strong> <span className="mono">{selectedNode.id}</span></p>
                     <p><strong>Type:</strong> {selectedNode.type}</p>
-                    <p>
-                      <strong>Related policies:</strong>{' '}
-                      {(policies ?? [])
-                        .filter((policy) => policy.name.includes(selectedNode.label) || selectedNode.id.includes(policy.name))
-                        .map((policy) => `${policy.namespace}/${policy.name}`)
-                        .join(', ') || 'No direct policy matches'}
-                    </p>
+                    {selectedNode.meta?.namespace && (
+                      <p><strong>Namespace:</strong> {selectedNode.meta.namespace}</p>
+                    )}
+                    {selectedNode.meta?.kind && (
+                      <p><strong>Kind:</strong> {selectedNode.meta.kind}</p>
+                    )}
+                    {selectedNode.meta?.policyTypes && (
+                      <p><strong>Policy types:</strong> {selectedNode.meta.policyTypes.join(', ') || '—'}</p>
+                    )}
+                    {selectedNode.meta?.ingressRules != null && (
+                      <p>
+                        <strong>Rules:</strong> ingress {selectedNode.meta.ingressRules} · egress{' '}
+                        {selectedNode.meta.egressRules ?? 0}
+                      </p>
+                    )}
+                    {selectedNode.meta?.detail && <p className="meta-line">{selectedNode.meta.detail}</p>}
                     <p className="meta-line">
-                      This graph is modeled from offline analysis. It does not represent live cluster traffic.
+                      {useDiscoveryTopology
+                        ? 'Live discovery graph: relationships are inferred from NetworkPolicy selectors. Not a runtime traffic map.'
+                        : 'Offline analysis graph: modeled from manifests, not live cluster traffic.'}
                     </p>
                   </div>
                 ) : (
-                  <EmptyState title="Select a node" body="Choose a node in the graph or list to inspect relationships." />
+                  <EmptyState title="Select a node" body="Click a node in the graph to inspect policy or workload details." />
                 )}
               </Panel>
             </div>
