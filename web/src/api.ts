@@ -126,10 +126,16 @@ export function explainFinding(analysisId: string, findingId: string, signal?: A
   return fetchJSON<Explanation>(`${API_BASE}/analyses/${analysisId}/explain/${findingId}`, { signal })
 }
 
-export function postDiff(basePath: string, proposedPath: string, signal?: AbortSignal) {
+export function postDiff(
+  input:
+    | { basePath: string; proposedPath: string }
+    | { baseManifest: string; proposedManifest: string }
+    | { basePath?: string; proposedPath?: string; baseManifest?: string; proposedManifest?: string },
+  signal?: AbortSignal,
+) {
   return fetchJSON<DiffReport>(`${API_BASE}/diff`, {
     method: 'POST',
-    body: JSON.stringify({ basePath, proposedPath }),
+    body: JSON.stringify(input),
     signal,
   })
 }

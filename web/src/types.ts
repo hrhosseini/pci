@@ -1,14 +1,4 @@
-export type Route =
-  | 'dashboard'
-  | 'topology'
-  | 'policies'
-  | 'results'
-  | 'findings'
-  | 'comparison'
-  | 'snapshots'
-  | 'verification'
-  | 'reports'
-  | 'settings'
+export type Route = 'overview' | 'topology' | 'policies' | 'compare' | 'reports'
 
 export type PolicySummary = {
   namespace: string

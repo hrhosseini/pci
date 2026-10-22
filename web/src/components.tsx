@@ -255,15 +255,11 @@ export function ConnectionStrip({
   apiLabel,
   discoveryLabel,
   discoveryTone,
-  verificationLabel,
-  verificationTone,
 }: {
   apiOk: boolean
   apiLabel: string
   discoveryLabel: string
   discoveryTone: 'success' | 'warning' | 'muted' | 'danger'
-  verificationLabel: string
-  verificationTone: 'success' | 'warning' | 'muted' | 'danger'
 }) {
   return (
     <div className="connection-strip" aria-label="Connection status">
@@ -275,10 +271,59 @@ export function ConnectionStrip({
         <span className="conn-dot" aria-hidden />
         Discovery · {discoveryLabel}
       </span>
-      <span className={`conn-pill ${verificationTone}`}>
-        <span className="conn-dot" aria-hidden />
-        Verification · {verificationLabel}
-      </span>
     </div>
   )
+}
+
+export function ActionCard({
+  title,
+  body,
+  badge,
+  action,
+}: {
+  title: string
+  body: string
+  badge?: string
+  action: ReactNode
+}) {
+  return (
+    <article className="action-card">
+      <div className="action-card-copy">
+        {badge && <span className="action-card-badge">{badge}</span>}
+        <h3>{title}</h3>
+        <p>{body}</p>
+      </div>
+      <div className="action-card-cta">{action}</div>
+    </article>
+  )
+}
+
+export function StatTile({
+  label,
+  value,
+  hint,
+  available = true,
+}: {
+  label: string
+  value: string | number
+  hint?: string
+  available?: boolean
+}) {
+  return (
+    <article className={`stat-tile ${available ? '' : 'unavailable'}`}>
+      <span className="stat-label">{label}</span>
+      <strong className="stat-value">{available ? value : '—'}</strong>
+      <span className="stat-hint">{available ? hint : 'Data not available'}</span>
+    </article>
+  )
+}
+
+export function Callout({
+  children,
+  tone = 'muted',
+}: {
+  children: ReactNode
+  tone?: 'muted' | 'info' | 'warning'
+}) {
+  return <p className={`inline-callout tone-${tone}`}>{children}</p>
 }

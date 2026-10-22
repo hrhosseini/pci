@@ -1,16 +1,36 @@
 import type { Route } from './types'
 
 export const NAV_ITEMS: { key: Route; label: string; icon: string; description: string }[] = [
-  { key: 'dashboard', label: 'Dashboard', icon: 'dashboard', description: 'Overview of modeled policy impact' },
-  { key: 'topology', label: 'Topology', icon: 'topology', description: 'Modeled graph of policies and relationships' },
-  { key: 'policies', label: 'Policies', icon: 'policies', description: 'Policy inventory and manifest analysis' },
-  { key: 'results', label: 'Results', icon: 'results', description: 'Analysis summary and metadata' },
-  { key: 'findings', label: 'Findings', icon: 'findings', description: 'Structured findings with explanations' },
-  { key: 'comparison', label: 'Comparison', icon: 'comparison', description: 'Base versus proposed semantic diff' },
-  { key: 'snapshots', label: 'Snapshots', icon: 'snapshots', description: 'Saved offline policy snapshots' },
-  { key: 'verification', label: 'Verification', icon: 'verification', description: 'Runtime observation evidence' },
-  { key: 'reports', label: 'Reports', icon: 'reports', description: 'Review-oriented analysis reports' },
-  { key: 'settings', label: 'Settings', icon: 'settings', description: 'API and analysis configuration' },
+  {
+    key: 'overview',
+    label: 'Overview',
+    icon: 'dashboard',
+    description: 'Cluster status and quick actions',
+  },
+  {
+    key: 'topology',
+    label: 'Topology',
+    icon: 'topology',
+    description: 'Modeled policy–workload relationships',
+  },
+  {
+    key: 'policies',
+    label: 'Policies',
+    icon: 'policies',
+    description: 'Live inventory and offline YAML analysis',
+  },
+  {
+    key: 'compare',
+    label: 'Compare',
+    icon: 'comparison',
+    description: 'Diff base vs proposed policies',
+  },
+  {
+    key: 'reports',
+    label: 'Reports',
+    icon: 'reports',
+    description: 'Findings, snapshots, and saved reports',
+  },
 ]
 
 export function severityTone(value: string): 'danger' | 'warning' | 'success' | 'neutral' {
@@ -19,4 +39,9 @@ export function severityTone(value: string): 'danger' | 'warning' | 'success' | 
   if (level.includes('medium') || level.includes('warn')) return 'warning'
   if (level.includes('low') || level.includes('info')) return 'success'
   return 'neutral'
+}
+
+export function severityLabel(value: string): string {
+  const level = (value || '').trim()
+  return level ? level : 'unspecified'
 }

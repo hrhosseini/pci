@@ -2,8 +2,10 @@ import { useCallback, useEffect, useMemo, useRef, useState, type PointerEvent as
 import './App.css'
 import * as api from './api'
 import {
+  ActionCard,
   Badge,
   Button,
+  Callout,
   ConnectionStrip,
   EmptyState,
   ErrorBanner,
@@ -11,8 +13,9 @@ import {
   PageHeader,
   Panel,
   Skeleton,
+  StatTile,
 } from './components'
-import { NAV_ITEMS, severityTone } from './nav'
+import { NAV_ITEMS, severityLabel, severityTone } from './nav'
 import { discoveryStripLabel, summarizeDiscoveryError } from './discoveryStatus'
 import { buildDiscoveryGraph, type DiscoveryGraphNode } from './discoveryGraph'
 import type {
@@ -26,7 +29,6 @@ import type {
   Report,
   Route,
   Snapshot,
-  VerificationEvidence,
 } from './types'
 
 type AppData = {
@@ -37,8 +39,6 @@ type AppData = {
   diff: DiffReport | null
   snapshots: Snapshot[]
   report: Report | null
-  verificationEvidence: VerificationEvidence[]
-  verificationEnabled: boolean
   clusterDiscovery: ClusterDiscoveryResponse | null
   discoveryLoading: boolean
   discoveryError: string | null
@@ -59,8 +59,6 @@ const initialData: AppData = {
   diff: null,
   snapshots: [],
   report: null,
-  verificationEvidence: [],
-  verificationEnabled: false,
   clusterDiscovery: null,
   discoveryLoading: false,
   discoveryError: null,
@@ -72,49 +70,35 @@ const initialData: AppData = {
   selectedFinding: null,
 }
 
-const DEFAULT_MANIFEST = `apiVersion: networking.k8s.io/v1
-kind: NetworkPolicy
-metadata:
-  name: demo-allow
-  namespace: default
-spec:
-  podSelector:
-    matchLabels:
-      app: api
-  policyTypes:
-    - Ingress
-  ingress:
-    - from:
-        - podSelector:
-            matchLabels:
-              app: web
-      ports:
-        - protocol: TCP
-          port: 8080
-`
-
 function App() {
-  const [route, setRoute] = useState<Route>('dashboard')
+  const [route, setRoute] = useState<Route>('overview')
   const [data, setData] = useState<AppData>(initialData)
-  const [workspacePath, setWorkspacePath] = useState('fixtures/base')
-  const [workspacePathDraft, setWorkspacePathDraft] = useState('fixtures/base')
+  const [workspacePath] = useState('fixtures/base')
   const [analysisPath, setAnalysisPath] = useState('fixtures/base')
   const [proposedPath, setProposedPath] = useState('fixtures/proposed')
-  const [manifestText, setManifestText] = useState(DEFAULT_MANIFEST)
+  const [manifestText, setManifestText] = useState('')
+  const [baseManifest, setBaseManifest] = useState('')
+  const [proposedManifest, setProposedManifest] = useState('')
+  const [compareMode, setCompareMode] = useState<'paths' | 'manifests'>('paths')
   const [namespaceFilter, setNamespaceFilter] = useState('all')
   const [searchText, setSearchText] = useState('')
   const [severityFilter, setSeverityFilter] = useState('all')
-  const [changedOnly, setChangedOnly] = useState(false)
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null)
   const [selectedFindingId, setSelectedFindingId] = useState<string | null>(null)
   const [policyQuery, setPolicyQuery] = useState('')
   const [expandedPolicy, setExpandedPolicy] = useState<string | null>(null)
+  const [expandedFinding, setExpandedFinding] = useState<string | null>(null)
   const [zoom, setZoom] = useState(1)
   const [pan, setPan] = useState({ x: 0, y: 0 })
   const [panning, setPanning] = useState(false)
   const [graphSource, setGraphSource] = useState<'discovery' | 'analysis'>('discovery')
+  const [reportsTab, setReportsTab] = useState<'findings' | 'snapshots' | 'report'>('findings')
   const panOrigin = useRef<{ x: number; y: number; panX: number; panY: number } | null>(null)
   const abortRef = useRef<AbortController | null>(null)
+
+  const sampleBase = data.capabilities?.samplePaths?.base || workspacePath
+  const sampleProposed = data.capabilities?.samplePaths?.proposed || proposedPath
+  const sampleAvailable = Boolean(data.capabilities?.samplePaths?.baseAvailable)
 
   const loadWorkspace = useCallback(async (path: string) => {
     abortRef.current?.abort()
@@ -122,50 +106,37 @@ function App() {
     abortRef.current = controller
     const { signal } = controller
 
-    setData((prev) => ({
-      ...prev,
-      bootLoading: prev.health == null,
-      dataLoading: true,
-      error: null,
-      errorDetail: undefined,
-      actionError: null,
-    }))
-
     try {
+      // Fetch before any setState so mount useEffect does not update state synchronously.
       const health = await api.getHealth(signal)
       const capabilities = await api.getCapabilities(signal)
-      const sampleBase = capabilities.samplePaths?.base || path
-      const sampleProposed = capabilities.samplePaths?.proposed || 'fixtures/proposed'
-      // Container images advertise absolute sample paths; switch off the local-dev default once.
-      if (
-        capabilities.samplePaths?.baseAvailable &&
-        capabilities.samplePaths.base &&
-        (path === 'fixtures/base' || path.startsWith('fixtures/'))
-      ) {
-        setWorkspacePath(capabilities.samplePaths.base)
-        setWorkspacePathDraft(capabilities.samplePaths.base)
-        setAnalysisPath(capabilities.samplePaths.base)
-        if (capabilities.samplePaths.proposed) {
-          setProposedPath(capabilities.samplePaths.proposed)
-        }
-        setData((prev) => ({
-          ...prev,
-          health,
-          capabilities,
-          apiConnected: Boolean(health.ok),
-          bootLoading: false,
-          verificationEnabled: Boolean(capabilities.verification?.enabled),
-        }))
-        return
-      }
+      if (signal.aborted) return
+
+      const sampleBasePath = capabilities.samplePaths?.base || path
+      const sampleProposedPath = capabilities.samplePaths?.proposed || 'fixtures/proposed'
+
       setData((prev) => ({
         ...prev,
         health,
         capabilities,
         apiConnected: Boolean(health.ok),
         bootLoading: false,
-        verificationEnabled: Boolean(capabilities.verification?.enabled),
+        dataLoading: true,
+        error: null,
+        errorDetail: undefined,
+        actionError: null,
       }))
+
+      if (
+        capabilities.samplePaths?.baseAvailable &&
+        capabilities.samplePaths.base &&
+        (path === 'fixtures/base' || path.startsWith('fixtures/'))
+      ) {
+        setAnalysisPath(capabilities.samplePaths.base)
+        if (capabilities.samplePaths.proposed) {
+          setProposedPath(capabilities.samplePaths.proposed)
+        }
+      }
 
       const analysesResponse = await api.listAnalyses(signal)
       let analysis: Analysis | null = null
@@ -173,11 +144,10 @@ function App() {
       if (analysesResponse.analyses?.[0]?.id) {
         analysis = await api.getAnalysis(analysesResponse.analyses[0].id, signal)
       }
-      if (!analysis) {
+      if (!analysis && capabilities.samplePaths?.baseAvailable !== false) {
         try {
-          analysis = await api.createAnalysis({ path: sampleBase }, signal)
+          analysis = await api.createAnalysis({ path: sampleBasePath }, signal)
         } catch (analysisError) {
-          // In-cluster installs must not hard-fail the whole UI when sample manifests are missing.
           analysisLoadError =
             analysisError instanceof Error
               ? analysisError.message
@@ -185,11 +155,12 @@ function App() {
         }
       }
 
-      const [graph, snapshotsResponse, verification, diff] = await Promise.all([
+      const [graph, snapshotsResponse, diff] = await Promise.all([
         analysis?.id ? api.getGraph(analysis.id, signal) : Promise.resolve(null),
         api.listSnapshots(signal),
-        api.listVerifications(signal),
-        api.postDiff(sampleBase, sampleProposed, signal).catch(() => null),
+        api
+          .postDiff({ basePath: sampleBasePath, proposedPath: sampleProposedPath }, signal)
+          .catch(() => null),
       ])
 
       const snapshots = await Promise.all(
@@ -206,8 +177,6 @@ function App() {
         graph,
         diff,
         snapshots,
-        verificationEvidence: verification.evidence ?? [],
-        verificationEnabled: capabilities.verification?.enabled ?? verification.verificationEnabled,
         apiConnected: Boolean(health.ok),
         bootLoading: false,
         dataLoading: false,
@@ -217,8 +186,6 @@ function App() {
       }))
       setSelectedNodeId(graph?.nodes[0]?.id ?? null)
 
-      // Kick off read-only cluster discovery so the dashboard reflects the live cluster
-      // (in-cluster ServiceAccount or local kubeconfig) without requiring a manual click first.
       if (capabilities.kubernetesSettings?.configured !== false) {
         void (async () => {
           setData((prev) => ({ ...prev, discoveryLoading: true, discoveryError: null }))
@@ -273,13 +240,17 @@ function App() {
     }
   }, [])
 
+  // Initial API bootstrap. Subsequent loads go through Refresh / Discover / Analyze actions.
   useEffect(() => {
+    // oxlint-disable-next-line react/set-state-in-effect -- async workspace bootstrap on mount
     void loadWorkspace(workspacePath)
     return () => abortRef.current?.abort()
   }, [loadWorkspace, workspacePath])
 
   const findings = data.analysis?.findings
   const policies = data.analysis?.policies
+  const liveDiscovery = Boolean(data.clusterDiscovery && !data.clusterDiscovery.offline)
+
   const namespaces = useMemo(() => {
     const fromAnalysis = (policies ?? []).map((policy) => policy.namespace)
     const fromDiscovery = [
@@ -295,11 +266,7 @@ function App() {
   )
 
   const hasLiveDiscoveryGraph =
-    Boolean(data.clusterDiscovery && !data.clusterDiscovery.offline) && liveDiscoveryGraph.nodes.length > 0
-
-  const highFindings = (findings ?? []).filter((finding) =>
-    ['high', 'critical'].includes((finding.severity || '').toLowerCase()),
-  ).length
+    liveDiscovery && liveDiscoveryGraph.nodes.length > 0
 
   const filteredFindings = useMemo(() => {
     const query = searchText.trim().toLowerCase()
@@ -329,39 +296,28 @@ function App() {
     })
   }, [policies, namespaceFilter, policyQuery])
 
+  const discoveryPolicies = useMemo(() => {
+    const list = data.clusterDiscovery?.networkPolicies ?? []
+    if (namespaceFilter === 'all') return list
+    return list.filter((policy) => policy.namespace === namespaceFilter)
+  }, [data.clusterDiscovery, namespaceFilter])
+
   const useDiscoveryTopology = graphSource === 'discovery' && hasLiveDiscoveryGraph
 
   const topologyNodes = useMemo(() => {
     const query = searchText.trim().toLowerCase()
     if (useDiscoveryTopology) {
       return liveDiscoveryGraph.nodes.filter((node) => {
-        const searchMatch =
-          !query || node.label.toLowerCase().includes(query) || node.id.toLowerCase().includes(query)
-        return searchMatch
+        return !query || node.label.toLowerCase().includes(query) || node.id.toLowerCase().includes(query)
       })
     }
     if (!data.graph?.nodes) return []
     return data.graph.nodes.filter((node) => {
       const namespaceMatch = namespaceFilter === 'all' || node.id.includes(namespaceFilter)
       const searchMatch = !query || node.label.toLowerCase().includes(query) || node.id.toLowerCase().includes(query)
-      const changedMatch =
-        !changedOnly ||
-        Boolean(
-          data.diff?.modified.some((updated) => node.id.includes(updated.key.split('/').pop() ?? '')) ||
-            data.diff?.added.some((item) => node.id.includes(item.split('/').pop() ?? '')) ||
-            data.diff?.removed.some((item) => node.id.includes(item.split('/').pop() ?? '')),
-        )
-      return namespaceMatch && searchMatch && changedMatch
+      return namespaceMatch && searchMatch
     })
-  }, [
-    useDiscoveryTopology,
-    liveDiscoveryGraph.nodes,
-    data.graph,
-    data.diff,
-    searchText,
-    namespaceFilter,
-    changedOnly,
-  ])
+  }, [useDiscoveryTopology, liveDiscoveryGraph.nodes, data.graph, searchText, namespaceFilter])
 
   const topologyEdges = useMemo(() => {
     const ids = new Set(topologyNodes.map((node) => node.id))
@@ -400,24 +356,27 @@ function App() {
         : null),
     kubeSettings ?? null,
   )
-  const discoveryLabel = strip.label
-  const discoveryTone = strip.tone
 
-  const verificationLabel = data.verificationEnabled
-    ? data.capabilities?.verification?.runtimeProbeImplemented
-      ? 'provider active'
-      : 'enabled (no production probe)'
-    : 'disabled'
-  const verificationTone: 'success' | 'warning' | 'muted' | 'danger' = data.verificationEnabled
-    ? data.capabilities?.verification?.runtimeProbeImplemented
-      ? 'success'
-      : 'warning'
-    : 'muted'
+  const podCount = liveDiscovery
+    ? (data.clusterDiscovery?.workloads ?? []).filter((item) => item.kind === 'Pod').length
+    : null
+  const workloadCount = liveDiscovery ? (data.clusterDiscovery?.workloads?.length ?? 0) : null
+  const namespaceCount = liveDiscovery ? (data.clusterDiscovery?.namespaces?.length ?? 0) : null
+  const networkPolicyCount = liveDiscovery
+    ? (data.clusterDiscovery?.networkPolicies?.length ?? 0)
+    : null
+  const lastDiscoveryAt = data.clusterDiscovery?.collectedAt
+    ? new Date(data.clusterDiscovery.collectedAt).toLocaleString()
+    : null
 
   async function runAnalyzeManifest() {
+    if (!manifestText.trim()) {
+      setData((prev) => ({ ...prev, actionError: 'Paste a NetworkPolicy YAML/JSON document first.' }))
+      return
+    }
     setData((prev) => ({ ...prev, actionError: null, dataLoading: true }))
     try {
-      const analysis = await api.createAnalysis({ manifest: manifestText, name: 'manual-proposed' })
+      const analysis = await api.createAnalysis({ manifest: manifestText, name: 'manual-analysis' })
       const graph = analysis.id ? await api.getGraph(analysis.id) : null
       setData((prev) => ({
         ...prev,
@@ -427,7 +386,7 @@ function App() {
         selectedFinding: null,
       }))
       setSelectedNodeId(graph?.nodes[0]?.id ?? null)
-      setRoute('results')
+      setRoute('policies')
     } catch (error) {
       setData((prev) => ({
         ...prev,
@@ -437,12 +396,38 @@ function App() {
     }
   }
 
+  async function runAnalyzeSample() {
+    setData((prev) => ({ ...prev, actionError: null, dataLoading: true }))
+    try {
+      const analysis = await api.createAnalysis({ path: sampleBase, name: 'sample-fixture' })
+      const graph = analysis.id ? await api.getGraph(analysis.id) : null
+      setData((prev) => ({
+        ...prev,
+        analysis,
+        graph,
+        dataLoading: false,
+        selectedFinding: null,
+      }))
+      setSelectedNodeId(graph?.nodes[0]?.id ?? null)
+    } catch (error) {
+      setData((prev) => ({
+        ...prev,
+        dataLoading: false,
+        actionError: error instanceof Error ? error.message : 'Could not load sample fixture',
+      }))
+    }
+  }
+
   async function runCreateSnapshot() {
     setData((prev) => ({ ...prev, actionError: null }))
     try {
-      const snapshot = await api.createSnapshot({ path: workspacePath, name: `snapshot-${Date.now()}` })
+      const snapshot = await api.createSnapshot({
+        path: data.analysis?.path || workspacePath,
+        name: `snapshot-${Date.now()}`,
+      })
       setData((prev) => ({ ...prev, snapshots: [snapshot, ...prev.snapshots] }))
-      setRoute('snapshots')
+      setReportsTab('snapshots')
+      setRoute('reports')
     } catch (error) {
       setData((prev) => ({
         ...prev,
@@ -454,7 +439,13 @@ function App() {
   async function runDiff() {
     setData((prev) => ({ ...prev, actionError: null, dataLoading: true }))
     try {
-      const diff = await api.postDiff(analysisPath, proposedPath)
+      const diff =
+        compareMode === 'manifests'
+          ? await api.postDiff({
+              baseManifest: baseManifest.trim(),
+              proposedManifest: proposedManifest.trim(),
+            })
+          : await api.postDiff({ basePath: analysisPath, proposedPath })
       setData((prev) => ({ ...prev, diff, dataLoading: false }))
     } catch (error) {
       setData((prev) => ({
@@ -487,6 +478,7 @@ function App() {
         discoveryLoading: false,
         discoveryError: null,
       }))
+      setGraphSource('discovery')
     } catch (error) {
       setData((prev) => ({
         ...prev,
@@ -503,6 +495,8 @@ function App() {
         ? await api.createReport({ analysisId: data.analysis.id })
         : await api.createReport({ path: workspacePath })
       setData((prev) => ({ ...prev, report, dataLoading: false }))
+      setReportsTab('report')
+      setRoute('reports')
     } catch (error) {
       setData((prev) => ({
         ...prev,
@@ -515,6 +509,7 @@ function App() {
   async function runExplain(findingId: string) {
     if (!data.analysis?.id) return
     setSelectedFindingId(findingId)
+    setExpandedFinding(findingId)
     try {
       const explanation = await api.explainFinding(data.analysis.id, findingId)
       setData((prev) => ({ ...prev, selectedFinding: explanation, actionError: null }))
@@ -551,14 +546,12 @@ function App() {
     event.currentTarget.releasePointerCapture(event.pointerId)
   }
 
-  const activeNav = NAV_ITEMS.find((item) => item.key === route)
-
   if (data.bootLoading) {
     return (
       <div className="boot-screen">
         <div className="boot-card">
-          <h1>PolicyChangeImpact</h1>
-          <p>Connecting to the local API and loading workspace data…</p>
+          <h1>PCI</h1>
+          <p>Connecting to the API and loading workspace data…</p>
           <Skeleton rows={4} />
         </div>
       </div>
@@ -592,7 +585,7 @@ function App() {
           <div className="brand-mark">PCI</div>
           <div className="brand-copy">
             <strong>PolicyChangeImpact</strong>
-            <span>NetworkPolicy analysis</span>
+            <span>NetworkPolicy inspector</span>
           </div>
         </div>
         <nav className="nav" aria-label="Primary">
@@ -605,12 +598,15 @@ function App() {
               aria-current={route === item.key ? 'page' : undefined}
             >
               <Icon name={item.icon} />
-              {item.label}
+              <span className="nav-item-copy">
+                <span className="nav-item-label">{item.label}</span>
+                <span className="nav-item-desc">{item.description}</span>
+              </span>
             </button>
           ))}
         </nav>
         <div className="sidebar-foot">
-          Offline-first analysis. Modeled predictions are not runtime proof.
+          Read-only discovery and offline modeling. Not a live network controller.
         </div>
       </aside>
 
@@ -619,10 +615,8 @@ function App() {
           <ConnectionStrip
             apiOk={data.apiConnected}
             apiLabel={data.apiConnected ? `connected (${data.health?.version ?? 'dev'})` : 'disconnected'}
-            discoveryLabel={discoveryLabel}
-            discoveryTone={discoveryTone}
-            verificationLabel={verificationLabel}
-            verificationTone={verificationTone}
+            discoveryLabel={strip.label}
+            discoveryTone={strip.tone}
           />
           <Button variant="secondary" onClick={() => void loadWorkspace(workspacePath)} disabled={data.dataLoading}>
             <Icon name="refresh" />
@@ -640,581 +634,608 @@ function App() {
             />
           )}
           {data.actionError && (
-            <ErrorBanner title="Action failed" message={data.actionError} onRetry={() => setData((prev) => ({ ...prev, actionError: null }))} />
+            <ErrorBanner
+              title="Action failed"
+              message={data.actionError}
+              onRetry={() => setData((prev) => ({ ...prev, actionError: null }))}
+            />
           )}
 
-          <PageHeader
-            breadcrumbs={['PCI', activeNav?.label ?? route]}
-            title={activeNav?.label ?? route}
-            description={activeNav?.description}
-            actions={
-              route === 'snapshots' ? (
-                <Button variant="primary" onClick={() => void runCreateSnapshot()} disabled={!data.apiConnected}>
-                  Create snapshot
-                </Button>
-              ) : route === 'comparison' ? (
-                <Button variant="primary" onClick={() => void runDiff()} disabled={data.dataLoading}>
-                  Run comparison
-                </Button>
-              ) : route === 'reports' ? (
-                <Button variant="primary" onClick={() => void runReport()} disabled={data.dataLoading}>
-                  Generate report
-                </Button>
-              ) : undefined
-            }
-          />
-
-          {data.dataLoading && !data.analysis ? <Skeleton rows={6} /> : null}
-
-          {route === 'dashboard' && (
+          {route === 'overview' && (
             <>
-              <section className="metrics-grid">
-                <article className="metric-card">
-                  <span>Policies analyzed</span>
-                  <strong>{data.analysis?.summary.totalPolicies ?? 0}</strong>
-                  <em>From current offline analysis</em>
-                </article>
-                <article className="metric-card tone-warning">
-                  <span>Default deny</span>
-                  <strong>{data.analysis?.summary.defaultDeny ?? 0}</strong>
-                  <em>Policies with default-deny posture</em>
-                </article>
-                <article className="metric-card tone-danger">
-                  <span>High-severity findings</span>
-                  <strong>{highFindings}</strong>
-                  <em>Modeled severity, not runtime proof</em>
-                </article>
-                <article className={`metric-card ${data.clusterDiscovery && !data.clusterDiscovery.offline ? 'tone-success' : ''}`}>
-                  <span>Kubernetes discovery</span>
-                  <strong style={{ fontSize: '1.05rem' }}>{discoveryLabel}</strong>
-                  <em>
-                    {data.clusterDiscovery?.cluster?.context ||
-                      kubeSettings?.resolvedContext ||
-                      discovery?.warnings?.[0] ||
-                      'Read-only discovery; not a live inventory for flows'}
-                  </em>
-                </article>
+              <PageHeader
+                breadcrumbs={['PCI', 'Overview']}
+                title="Cluster Overview"
+                description="مشاهده و تحلیل NetworkPolicyهای کلاستر"
+                actions={
+                  <Button
+                    variant="primary"
+                    onClick={() => void runClusterDiscover()}
+                    disabled={data.discoveryLoading || !data.apiConnected}
+                  >
+                    <Icon name="refresh" />
+                    {data.discoveryLoading ? 'Discovering…' : 'Discover / Refresh'}
+                  </Button>
+                }
+              />
+
+              <section className="status-bar" aria-live="polite">
+                <div>
+                  <span className="status-label">Cluster connection</span>
+                  <strong>{strip.label}</strong>
+                </div>
+                <div>
+                  <span className="status-label">Last successful discovery</span>
+                  <strong>{lastDiscoveryAt ?? 'Not yet available'}</strong>
+                </div>
+                <div>
+                  <span className="status-label">Mode</span>
+                  <strong>
+                    {kubeSettings?.resolvedMode ||
+                      kubeSettings?.mode ||
+                      (kubeSettings?.inClusterEnv ? 'in-cluster' : 'auto')}
+                  </strong>
+                </div>
               </section>
 
-              <Panel
-                title="Cluster discovery"
-                meta={
-                  <div className="page-actions">
-                    <Badge tone="muted">read-only</Badge>
-                    <Button variant="primary" onClick={() => void runClusterDiscover()} disabled={data.discoveryLoading || !data.apiConnected}>
-                      {data.discoveryLoading ? 'Discovering…' : 'Discover / Refresh'}
-                    </Button>
-                  </div>
-                }
-              >
-                <p className="callout">
-                  Discovery uses the API process kubeconfig (flags or <span className="mono">PCI_KUBECONFIG</span> / <span className="mono">PCI_KUBE_CONTEXT</span>).
-                  It never applies or deletes cluster resources. Modeled analysis remains separate from live inventory.
-                </p>
-                {data.discoveryError && (
-                  <ErrorBanner title="Discovery unavailable" message={data.discoveryError} onRetry={() => void runClusterDiscover()} />
-                )}
-                {data.discoveryLoading && <Skeleton rows={4} />}
-                {!data.discoveryLoading && data.clusterDiscovery && !data.clusterDiscovery.offline && (
-                  <>
-                    <div className="metrics-grid">
-                      <article className="metric-card">
-                        <span>Context</span>
-                        <strong style={{ fontSize: '1rem' }} className="mono">
-                          {data.clusterDiscovery.cluster?.context || kubeSettings?.resolvedContext || '—'}
-                        </strong>
-                      </article>
-                      <article className="metric-card">
-                        <span>API host</span>
-                        <strong style={{ fontSize: '0.85rem' }} className="mono">
-                          {data.clusterDiscovery.cluster?.host || '—'}
-                        </strong>
-                      </article>
-                      <article className="metric-card">
-                        <span>Namespaces</span>
-                        <strong>{data.clusterDiscovery.namespaces?.length ?? 0}</strong>
-                      </article>
-                      <article className="metric-card">
-                        <span>NetworkPolicies</span>
-                        <strong>{data.clusterDiscovery.networkPolicies?.length ?? 0}</strong>
-                      </article>
-                    </div>
-                    <div className="split-2">
-                      <div className="detail-card">
-                        <h4>Namespaces</h4>
-                        {(data.clusterDiscovery.namespaces?.length ?? 0) === 0 ? (
-                          <p className="meta-line">None returned</p>
-                        ) : (
-                          <ul className="list-stack">
-                            {(data.clusterDiscovery.namespaces ?? []).slice(0, 20).map((namespace) => (
-                              <li key={namespace} className="mono meta-line">{namespace}</li>
-                            ))}
-                          </ul>
-                        )}
-                        {(data.clusterDiscovery.namespaces?.length ?? 0) > 20 && (
-                          <p className="meta-line">Showing first 20 of {data.clusterDiscovery.namespaces?.length}</p>
-                        )}
-                      </div>
-                      <div className="detail-card">
-                        <h4>NetworkPolicies</h4>
-                        {(data.clusterDiscovery.networkPolicies?.length ?? 0) === 0 ? (
-                          <p className="meta-line">None returned in this discovery scope</p>
-                        ) : (
-                          <ul className="list-stack">
-                            {(data.clusterDiscovery.networkPolicies ?? []).slice(0, 20).map((policy) => (
-                              <li key={`${policy.namespace}/${policy.name}`} className="list-item">
-                                <strong className="mono">{policy.namespace}/{policy.name}</strong>
-                                <p className="meta-line">
-                                  {(policy.policyTypes ?? []).join(', ') || 'types n/a'} · ingress {policy.ingressRules} · egress {policy.egressRules}
-                                </p>
-                              </li>
-                            ))}
-                          </ul>
-                        )}
-                      </div>
-                    </div>
-                    <div className="detail-card" style={{ marginTop: 12 }}>
-                      <h4>Workloads (sample)</h4>
-                      <p className="meta-line">
-                        {(data.clusterDiscovery.workloads ?? []).filter((item) => item.kind === 'Pod').length} pods ·{' '}
-                        {data.clusterDiscovery.workloads?.length ?? 0} workload records · collected{' '}
-                        {data.clusterDiscovery.collectedAt ? new Date(data.clusterDiscovery.collectedAt).toLocaleString() : '—'}
-                        {data.clusterDiscovery.complete ? '' : ' · incomplete'}
-                      </p>
-                      <ul className="list-stack">
-                        {(data.clusterDiscovery.workloads ?? []).slice(0, 12).map((workload) => (
-                          <li key={`${workload.kind}/${workload.namespace}/${workload.name}`} className="mono meta-line">
-                            {workload.kind} {workload.namespace}/{workload.name}
-                            {workload.hostNetwork ? ' (hostNetwork)' : ''}
-                          </li>
-                        ))}
-                      </ul>
-                    </div>
-                    {(data.clusterDiscovery.warnings?.length ?? 0) > 0 && (
-                      <p className="callout">{data.clusterDiscovery.warnings?.join(' ')}</p>
-                    )}
-                  </>
-                )}
-                {!data.discoveryLoading && !data.clusterDiscovery && !data.discoveryError && (
-                  <EmptyState
-                    title="No discovery run yet"
-                    body="Click Discover / Refresh to query the cluster configured for the API process."
+              {data.discoveryError && (
+                <ErrorBanner
+                  title="Discovery unavailable"
+                  message={data.discoveryError}
+                  onRetry={() => void runClusterDiscover()}
+                />
+              )}
+              {data.discoveryLoading && <Skeleton rows={3} />}
+
+              <section className="metrics-grid">
+                <StatTile
+                  label="Namespaces"
+                  value={namespaceCount ?? '—'}
+                  available={namespaceCount != null}
+                  hint={liveDiscovery ? 'From live discovery' : undefined}
+                />
+                <StatTile
+                  label="NetworkPolicies"
+                  value={networkPolicyCount ?? '—'}
+                  available={networkPolicyCount != null}
+                  hint={liveDiscovery ? 'From live discovery' : undefined}
+                />
+                <StatTile
+                  label="Pods"
+                  value={podCount ?? '—'}
+                  available={podCount != null}
+                  hint={liveDiscovery ? 'Discovered Pod workloads' : undefined}
+                />
+                <StatTile
+                  label="Workloads"
+                  value={workloadCount ?? '—'}
+                  available={workloadCount != null}
+                  hint={liveDiscovery ? 'Pods and controllers' : undefined}
+                />
+              </section>
+
+              <Panel title="What you can do">
+                <div className="action-grid">
+                  <ActionCard
+                    title="Cluster Discovery"
+                    body="مشاهده منابع و policyهای کلاستر"
+                    badge="live"
                     action={
-                      <Button variant="primary" onClick={() => void runClusterDiscover()} disabled={!data.apiConnected}>
-                        Discover cluster
+                      <Button variant="primary" onClick={() => void runClusterDiscover()} disabled={data.discoveryLoading}>
+                        Discover
                       </Button>
                     }
                   />
-                )}
+                  <ActionCard
+                    title="Topology"
+                    body="مشاهده روابط مدل‌شده policy و workload"
+                    badge="modeled"
+                    action={
+                      <Button
+                        variant="secondary"
+                        onClick={() => {
+                          setGraphSource(hasLiveDiscoveryGraph ? 'discovery' : 'analysis')
+                          setRoute('topology')
+                        }}
+                      >
+                        Open topology
+                      </Button>
+                    }
+                  />
+                  <ActionCard
+                    title="Offline Analysis"
+                    body="بررسی YAML/JSON و مشاهده findings"
+                    badge="offline"
+                    action={
+                      <Button variant="secondary" onClick={() => setRoute('policies')}>
+                        Analyze policies
+                      </Button>
+                    }
+                  />
+                  <ActionCard
+                    title="Comparison"
+                    body="بررسی تفاوت دو مجموعه policy"
+                    badge="diff"
+                    action={
+                      <Button variant="secondary" onClick={() => setRoute('compare')}>
+                        Compare policies
+                      </Button>
+                    }
+                  />
+                  <ActionCard
+                    title="Reports"
+                    body="مشاهده و ذخیره نتایج تحلیل"
+                    badge="saved"
+                    action={
+                      <Button variant="secondary" onClick={() => setRoute('reports')}>
+                        View reports
+                      </Button>
+                    }
+                  />
+                </div>
               </Panel>
 
-              <section className="content-grid">
+              {liveDiscovery && (
                 <Panel
-                  title="Policy topology preview"
-                  meta={
-                    <Badge tone={hasLiveDiscoveryGraph ? 'success' : 'info'}>
-                      {hasLiveDiscoveryGraph ? 'live discovery' : 'offline analysis'}
-                    </Badge>
-                  }
+                  title="Recently discovered policies"
+                  meta={<Badge tone="success">{discoveryPolicies.length} live</Badge>}
                 >
-                  {hasLiveDiscoveryGraph ? (
-                    <svg
-                      viewBox="0 0 960 560"
-                      className="graph-canvas topology-stage preview"
-                      style={{ height: 260 }}
-                      aria-label="Discovery graph preview"
-                    >
-                      {liveDiscoveryGraph.edges.slice(0, 36).map((edge, index) => {
-                        const source = liveDiscoveryGraph.nodes.find((node) => node.id === edge.source)
-                        const target = liveDiscoveryGraph.nodes.find((node) => node.id === edge.target)
-                        if (!source || !target) return null
-                        const mx = ((source.x ?? 0) + (target.x ?? 0)) / 2
-                        const my = ((source.y ?? 0) + (target.y ?? 0)) / 2 - 20
-                        return (
-                          <path
-                            key={edge.id}
-                            d={`M ${source.x ?? 40} ${source.y ?? 40} Q ${mx} ${my} ${target.x ?? 200} ${target.y ?? 120}`}
-                            className={`edge flow ${edge.kind || 'selects'}`}
-                            style={{ animationDelay: `${index * 30}ms` }}
-                          />
-                        )
-                      })}
-                      {liveDiscoveryGraph.nodes.slice(0, 24).map((node, index) => (
-                        <g key={node.id} className="node-group" style={{ animationDelay: `${index * 40}ms` }}>
-                          <circle
-                            cx={node.x ?? 60}
-                            cy={node.y ?? 80}
-                            r={node.type === 'namespace' ? 22 : 16}
-                            className={`node ${node.type}`}
-                          />
-                          <text className="graph-label" x={node.x ?? 60} y={(node.y ?? 80) + 28} textAnchor="middle">
-                            {node.label}
-                          </text>
-                        </g>
-                      ))}
-                    </svg>
-                  ) : data.graph && data.graph.nodes.length > 0 ? (
-                    <svg viewBox="0 0 420 220" className="graph-canvas" style={{ height: 240 }} aria-label="Network graph preview">
-                      {data.graph.edges.map((edge) => {
-                        const source = data.graph?.nodes.find((node) => node.id === edge.source)
-                        const target = data.graph?.nodes.find((node) => node.id === edge.target)
-                        if (!source || !target) return null
-                        return (
-                          <line
-                            key={edge.id}
-                            x1={source.x ?? 80}
-                            y1={source.y ?? 80}
-                            x2={target.x ?? 280}
-                            y2={target.y ?? 140}
-                            className="edge"
-                          />
-                        )
-                      })}
-                      {data.graph.nodes.map((node, index) => (
-                        <g key={node.id}>
-                          <circle
-                            cx={node.x ?? 70 + (index % 3) * 120}
-                            cy={node.y ?? 70 + (index % 2) * 80}
-                            r={node.type === 'cluster' ? 26 : 20}
-                            className={`node ${node.type}`}
-                          />
-                          <text
-                            className="graph-label"
-                            x={(node.x ?? 70 + (index % 3) * 120) - 18}
-                            y={(node.y ?? 70 + (index % 2) * 80) + 4}
-                          >
-                            {node.label}
-                          </text>
-                        </g>
-                      ))}
-                    </svg>
-                  ) : (
+                  {discoveryPolicies.length === 0 ? (
                     <EmptyState
-                      title="No graph yet"
-                      body="Run Discover after applying NetworkPolicies to render a live policy topology."
+                      title="No NetworkPolicies in this scope"
+                      body="Try another namespace filter or refresh discovery."
                       action={
                         <Button variant="secondary" onClick={() => void runClusterDiscover()}>
-                          Discover cluster
+                          Refresh
                         </Button>
                       }
                     />
-                  )}
-                  <div className="page-actions" style={{ marginTop: 12 }}>
-                    <Button
-                      variant="secondary"
-                      onClick={() => {
-                        setGraphSource(hasLiveDiscoveryGraph ? 'discovery' : 'analysis')
-                        setRoute('topology')
-                      }}
-                    >
-                      Open topology
-                    </Button>
-                    <Button variant="secondary" onClick={() => setRoute('comparison')}>
-                      Compare manifests
-                    </Button>
-                    <Button variant="secondary" onClick={() => setRoute('findings')}>
-                      Inspect findings
-                    </Button>
-                  </div>
-                </Panel>
-
-                <Panel title="Recent findings" meta={<Badge tone="muted">{findings?.length ?? 0} total</Badge>}>
-                  {(findings?.length ?? 0) === 0 ? (
-                    <EmptyState title="No findings" body="The current analysis did not produce structured findings." />
                   ) : (
-                    <ul className="finding-list">
-                      {(findings ?? []).slice(0, 6).map((finding) => (
-                        <li key={finding.id} className="list-item">
-                          <div style={{ display: 'flex', justifyContent: 'space-between', gap: 8 }}>
-                            <strong className="mono">{finding.id}</strong>
-                            <Badge tone={severityTone(finding.severity)} title={`Severity: ${finding.severity}`}>
-                              {finding.severity || 'unknown'}
-                            </Badge>
-                          </div>
-                          <p className="meta-line">{finding.message}</p>
-                          <Button variant="ghost" onClick={() => { setRoute('findings'); void runExplain(finding.id) }}>
-                            Explain
-                          </Button>
-                        </li>
-                      ))}
-                    </ul>
+                    <div className="table-wrap">
+                      <table className="data-table">
+                        <thead>
+                          <tr>
+                            <th>Namespace</th>
+                            <th>Name</th>
+                            <th>Types</th>
+                            <th>Rules</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {discoveryPolicies.slice(0, 25).map((policy) => (
+                            <tr
+                              key={`${policy.namespace}/${policy.name}`}
+                              className="clickable-row"
+                              onClick={() => {
+                                setNamespaceFilter(policy.namespace)
+                                setGraphSource('discovery')
+                                setRoute('topology')
+                              }}
+                            >
+                              <td className="mono">{policy.namespace}</td>
+                              <td className="mono">{policy.name}</td>
+                              <td>{(policy.policyTypes ?? []).join(', ') || '—'}</td>
+                              <td>
+                                ingress {policy.ingressRules} · egress {policy.egressRules}
+                              </td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
                   )}
                 </Panel>
-              </section>
+              )}
 
-              <Panel title="Activity" meta={<Badge tone="muted">from API</Badge>}>
-                <div className="activity-list">
-                  <div className="activity-item">
-                    <time>{data.analysis?.generatedAt ? new Date(data.analysis.generatedAt).toLocaleString() : '—'}</time>
-                    <div>
-                      <strong>Analysis</strong>
-                      <div className="meta-line">{data.analysis?.path || 'No analysis loaded'}</div>
-                    </div>
-                  </div>
-                  <div className="activity-item">
-                    <time>diff</time>
-                    <div>
-                      <strong>Comparison</strong>
-                      <div className="meta-line">
-                        {data.diff
-                          ? `${data.diff.added.length} added · ${data.diff.removed.length} removed · ${data.diff.modified.length} modified`
-                          : 'Not loaded yet'}
-                      </div>
-                    </div>
-                  </div>
-                  <div className="activity-item">
-                    <time>verify</time>
-                    <div>
-                      <strong>Runtime evidence</strong>
-                      <div className="meta-line">
-                        {data.verificationEvidence.length} stored observation
-                        {data.verificationEvidence.length === 1 ? '' : 's'} · verification {data.verificationEnabled ? 'enabled' : 'disabled'}
-                      </div>
-                    </div>
-                  </div>
-                </div>
+              {!data.discoveryLoading && !liveDiscovery && !data.discoveryError && (
+                <EmptyState
+                  title="No live discovery yet"
+                  body="Run Discover to query the cluster configured for the API process (read-only)."
+                  action={
+                    <Button variant="primary" onClick={() => void runClusterDiscover()} disabled={!data.apiConnected}>
+                      Discover cluster
+                    </Button>
+                  }
+                />
+              )}
+
+              <Panel title="About PCI" meta={<Badge tone="muted">limits</Badge>}>
+                <ul className="limits-list">
+                  <li>PCI discovers cluster resources read-only; it never applies or deletes NetworkPolicies.</li>
+                  <li>Topology edges model NetworkPolicy selectors — not real traffic paths or connection success.</li>
+                  <li>Offline analysis reflects the YAML/JSON you provide, not necessarily the live cluster.</li>
+                  <li>Current verification does not run production connectivity probes.</li>
+                </ul>
               </Panel>
             </>
           )}
 
           {route === 'topology' && (
-            <div className="stacked-grid">
-              <Panel
+            <>
+              <PageHeader
+                breadcrumbs={['PCI', 'Topology']}
                 title="Topology"
-                meta={
-                  <Badge tone={useDiscoveryTopology ? 'success' : 'info'}>
-                    {useDiscoveryTopology ? 'live discovery graph' : 'offline analysis graph'}
-                  </Badge>
+                description="Modeled relationships between namespaces, NetworkPolicies, and workloads"
+                actions={
+                  hasLiveDiscoveryGraph || liveDiscovery ? (
+                    <Button variant="secondary" onClick={() => void runClusterDiscover()} disabled={data.discoveryLoading}>
+                      {data.discoveryLoading ? 'Refreshing…' : 'Refresh discovery'}
+                    </Button>
+                  ) : undefined
                 }
-              >
-                <div className="toolbar">
-                  <div className="segmented" role="group" aria-label="Graph source">
-                    <button
-                      type="button"
-                      className={graphSource === 'discovery' ? 'active' : ''}
-                      onClick={() => setGraphSource('discovery')}
-                      disabled={!hasLiveDiscoveryGraph}
-                      title={hasLiveDiscoveryGraph ? 'Graph from discovered NetworkPolicies' : 'Run Discover first'}
-                    >
-                      Live discovery
-                    </button>
-                    <button
-                      type="button"
-                      className={graphSource === 'analysis' ? 'active' : ''}
-                      onClick={() => setGraphSource('analysis')}
-                    >
-                      Offline analysis
-                    </button>
+              />
+              <Callout tone="warning">
+                روابط بر اساس selectorهای NetworkPolicy مدل‌سازی شده‌اند. این گراف مسیر واقعی ترافیک یا موفقیت اتصال را
+                نشان نمی‌دهد.
+              </Callout>
+              <div className="topology-layout">
+                <Panel
+                  title="Graph"
+                  meta={
+                    <Badge tone={useDiscoveryTopology ? 'success' : 'info'}>
+                      {useDiscoveryTopology ? 'Live discovery' : 'Offline analysis'}
+                    </Badge>
+                  }
+                >
+                  <div className="toolbar">
+                    <div className="segmented" role="group" aria-label="Graph source">
+                      <button
+                        type="button"
+                        className={graphSource === 'discovery' ? 'active' : ''}
+                        onClick={() => setGraphSource('discovery')}
+                        disabled={!hasLiveDiscoveryGraph}
+                        title={hasLiveDiscoveryGraph ? 'From discovered NetworkPolicies' : 'Run Discover first'}
+                      >
+                        Live discovery
+                      </button>
+                      <button
+                        type="button"
+                        className={graphSource === 'analysis' ? 'active' : ''}
+                        onClick={() => setGraphSource('analysis')}
+                      >
+                        Offline analysis
+                      </button>
+                    </div>
+                    {useDiscoveryTopology && (
+                      <select
+                        value={namespaceFilter}
+                        onChange={(event) => setNamespaceFilter(event.target.value)}
+                        aria-label="Namespace"
+                      >
+                        <option value="all">All policy namespaces</option>
+                        {namespaces.map((namespace) => (
+                          <option key={namespace} value={namespace}>
+                            {namespace}
+                          </option>
+                        ))}
+                      </select>
+                    )}
+                    <input
+                      value={searchText}
+                      onChange={(event) => setSearchText(event.target.value)}
+                      placeholder="Search nodes"
+                      aria-label="Search nodes"
+                    />
+                    <span className="meta-line">
+                      {namespaceFilter === 'all' ? 'All namespaces' : namespaceFilter} · {topologyNodes.length} nodes ·{' '}
+                      {topologyEdges.length} edges
+                    </span>
                   </div>
-                  <input value={searchText} onChange={(event) => setSearchText(event.target.value)} placeholder="Search nodes" aria-label="Search nodes" />
-                  <select value={namespaceFilter} onChange={(event) => setNamespaceFilter(event.target.value)} aria-label="Namespace filter">
-                    <option value="all">Policy namespaces</option>
+                  <div
+                    className={`graph-canvas topology-stage ${panning ? 'panning' : ''}`}
+                    onPointerDown={onGraphPointerDown}
+                    onPointerMove={onGraphPointerMove}
+                    onPointerUp={onGraphPointerUp}
+                    onPointerLeave={onGraphPointerUp}
+                  >
+                    <div className="graph-controls">
+                      <Button variant="ghost" onClick={() => setZoom((value) => Math.min(2.5, value + 0.15))} title="Zoom in">
+                        +
+                      </Button>
+                      <Button variant="ghost" onClick={() => setZoom((value) => Math.max(0.5, value - 0.15))} title="Zoom out">
+                        −
+                      </Button>
+                      <Button variant="ghost" onClick={fitGraph} title="Fit to view">
+                        Fit
+                      </Button>
+                    </div>
+                    {topologyNodes.length === 0 ? (
+                      <div className="topology-empty">
+                        <EmptyState
+                          title={graphSource === 'discovery' ? 'No discovery graph' : 'No analysis graph'}
+                          body={
+                            graphSource === 'discovery'
+                              ? 'Run Discover, or choose another namespace that contains NetworkPolicies.'
+                              : 'Analyze policies first, or switch to Live discovery.'
+                          }
+                          action={
+                            graphSource === 'discovery' ? (
+                              <Button variant="primary" onClick={() => void runClusterDiscover()}>
+                                Discover / Refresh
+                              </Button>
+                            ) : (
+                              <Button variant="secondary" onClick={() => setRoute('policies')}>
+                                Analyze policies
+                              </Button>
+                            )
+                          }
+                        />
+                      </div>
+                    ) : (
+                      <svg viewBox="0 0 960 560" aria-label="Topology graph" className="topology-svg">
+                        <defs>
+                          <marker id="arrow-allows" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+                            <path d="M 0 0 L 10 5 L 0 10 z" className="edge-marker allows" />
+                          </marker>
+                          <marker id="arrow-isolates" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+                            <path d="M 0 0 L 10 5 L 0 10 z" className="edge-marker isolates" />
+                          </marker>
+                          <marker id="arrow-egress" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+                            <path d="M 0 0 L 10 5 L 0 10 z" className="edge-marker egress" />
+                          </marker>
+                          <marker id="arrow-selects" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+                            <path d="M 0 0 L 10 5 L 0 10 z" className="edge-marker selects" />
+                          </marker>
+                        </defs>
+                        <g transform={`translate(${pan.x} ${pan.y}) scale(${zoom})`}>
+                          {topologyEdges.map((edge, index) => {
+                            const source = nodeById.get(edge.source)
+                            const target = nodeById.get(edge.target)
+                            if (!source || !target) return null
+                            const kind = 'kind' in edge ? edge.kind : undefined
+                            const x1 = source.x ?? 80
+                            const y1 = source.y ?? 80
+                            const x2 = target.x ?? 280
+                            const y2 = target.y ?? 160
+                            const mx = (x1 + x2) / 2
+                            const my = (y1 + y2) / 2 - 18
+                            return (
+                              <g key={edge.id} className="edge-group" style={{ animationDelay: `${index * 40}ms` }}>
+                                <path
+                                  d={`M ${x1} ${y1} Q ${mx} ${my} ${x2} ${y2}`}
+                                  className={`edge flow ${kind || 'selects'}`}
+                                  markerEnd={`url(#arrow-${kind || 'selects'})`}
+                                />
+                              </g>
+                            )
+                          })}
+                          {topologyNodes.map((node, index) => {
+                            const cx = node.x ?? 80 + (index % 4) * 110
+                            const cy = node.y ?? 70 + Math.floor(index / 4) * 90
+                            const radius = node.type === 'namespace' ? 28 : node.type === 'policy' ? 22 : 18
+                            return (
+                              <g
+                                key={node.id}
+                                className="node-group"
+                                style={{ animationDelay: `${80 + index * 35}ms` }}
+                                onClick={() => setSelectedNodeId(node.id)}
+                              >
+                                <circle
+                                  cx={cx}
+                                  cy={cy}
+                                  r={radius + 6}
+                                  className={`node-halo ${node.type} ${selectedNodeId === node.id ? 'selected' : ''}`}
+                                />
+                                <circle
+                                  cx={cx}
+                                  cy={cy}
+                                  r={radius}
+                                  className={`node ${node.type} ${selectedNodeId === node.id ? 'selected' : ''}`}
+                                />
+                                <text className="graph-label" x={cx} y={cy + radius + 16} textAnchor="middle">
+                                  {node.label}
+                                </text>
+                              </g>
+                            )
+                          })}
+                        </g>
+                      </svg>
+                    )}
+                  </div>
+                  <div className="legend" aria-label="Legend">
+                    <span>
+                      <i className="namespace" />
+                      Namespace
+                    </span>
+                    <span>
+                      <i className="policy" />
+                      Policy
+                    </span>
+                    <span>
+                      <i className="workload" />
+                      Workload
+                    </span>
+                    <span className="legend-edge allows">selector match</span>
+                    <span className="legend-edge isolates">isolates</span>
+                  </div>
+                </Panel>
+                <Panel title="Selection" meta={<Badge tone="muted">details</Badge>}>
+                  {selectedNode ? (
+                    <div className="detail-card">
+                      <h4>{selectedNode.label}</h4>
+                      <p>
+                        <strong>Type:</strong> {selectedNode.type}
+                      </p>
+                      <p>
+                        <strong>ID:</strong> <span className="mono">{selectedNode.id}</span>
+                      </p>
+                      {selectedNode.meta?.namespace && (
+                        <p>
+                          <strong>Namespace:</strong> {selectedNode.meta.namespace}
+                        </p>
+                      )}
+                      {selectedNode.meta?.kind && (
+                        <p>
+                          <strong>Kind:</strong> {selectedNode.meta.kind}
+                        </p>
+                      )}
+                      {selectedNode.meta?.policyTypes && (
+                        <p>
+                          <strong>Policy types:</strong> {selectedNode.meta.policyTypes.join(', ') || '—'}
+                        </p>
+                      )}
+                      {selectedNode.meta?.ingressRules != null && (
+                        <p>
+                          <strong>Rules:</strong> ingress {selectedNode.meta.ingressRules} · egress{' '}
+                          {selectedNode.meta.egressRules ?? 0}
+                        </p>
+                      )}
+                      {selectedNode.meta?.detail && <p className="meta-line">{selectedNode.meta.detail}</p>}
+                      <Callout tone="muted">
+                        {useDiscoveryTopology
+                          ? 'Live discovery: selector-modeled relationships only.'
+                          : 'Offline analysis graph from manifests — not live cluster traffic.'}
+                      </Callout>
+                    </div>
+                  ) : (
+                    <EmptyState title="Select a node" body="Click a node in the graph to inspect details." />
+                  )}
+                </Panel>
+              </div>
+            </>
+          )}
+
+          {route === 'policies' && (
+            <>
+              <PageHeader
+                breadcrumbs={['PCI', 'Policies']}
+                title="Policies"
+                description="Live inventory from discovery and offline YAML/JSON analysis"
+              />
+              <Callout tone="info">
+                Offline analysis uses the YAML/JSON you provide and does not necessarily reflect the live cluster.
+              </Callout>
+              <div className="split-2">
+                <Panel title="Offline analysis" meta={<Badge tone="muted">POST /analyses</Badge>}>
+                  <p className="meta-line">Paste NetworkPolicy YAML or JSON, then analyze.</p>
+                  <textarea
+                    className="manifest-editor"
+                    value={manifestText}
+                    onChange={(event) => setManifestText(event.target.value)}
+                    aria-label="Policy manifest"
+                    placeholder="apiVersion: networking.k8s.io/v1&#10;kind: NetworkPolicy&#10;..."
+                  />
+                  <div className="page-actions">
+                    <Button variant="primary" onClick={() => void runAnalyzeManifest()} disabled={data.dataLoading}>
+                      Analyze policies
+                    </Button>
+                    {(sampleAvailable || sampleBase) && (
+                      <Button variant="secondary" onClick={() => void runAnalyzeSample()} disabled={data.dataLoading}>
+                        Load sample fixture
+                      </Button>
+                    )}
+                  </div>
+                </Panel>
+                <Panel
+                  title="Analysis results"
+                  meta={
+                    <Badge tone="info">
+                      {data.analysis ? `${data.analysis.summary.totalPolicies} policies` : 'none'}
+                    </Badge>
+                  }
+                >
+                  {!data.analysis ? (
+                    <EmptyState
+                      title="No analysis yet"
+                      body="Paste a manifest and analyze, or load the project sample fixture."
+                      action={
+                        <Button variant="secondary" onClick={() => void runAnalyzeSample()} disabled={data.dataLoading}>
+                          Load sample fixture
+                        </Button>
+                      }
+                    />
+                  ) : (
+                    <>
+                      <div className="metrics-grid compact">
+                        <StatTile label="Policies" value={data.analysis.summary.totalPolicies} hint={data.analysis.path || 'manifest'} />
+                        <StatTile label="Findings" value={data.analysis.summary.findingCount} />
+                        <StatTile label="Default deny" value={data.analysis.summary.defaultDeny} />
+                        <StatTile
+                          label="Generated"
+                          value={new Date(data.analysis.generatedAt).toLocaleString()}
+                        />
+                      </div>
+                      <div className="page-actions">
+                        <Button variant="secondary" onClick={() => { setReportsTab('findings'); setRoute('reports') }}>
+                          View findings
+                        </Button>
+                        <Button variant="secondary" onClick={() => void runCreateSnapshot()}>
+                          Save snapshot
+                        </Button>
+                        <Button
+                          variant="secondary"
+                          onClick={() => {
+                            setGraphSource('analysis')
+                            setRoute('topology')
+                          }}
+                        >
+                          Open graph
+                        </Button>
+                      </div>
+                    </>
+                  )}
+                </Panel>
+              </div>
+
+              {liveDiscovery && (
+                <Panel
+                  title="Discovered NetworkPolicies"
+                  meta={<Badge tone="success">{discoveryPolicies.length} live</Badge>}
+                >
+                  {discoveryPolicies.length === 0 ? (
+                    <EmptyState title="None in scope" body="No NetworkPolicies returned for the current discovery." />
+                  ) : (
+                    <div className="table-wrap">
+                      <table className="data-table">
+                        <thead>
+                          <tr>
+                            <th>Namespace / name</th>
+                            <th>Types</th>
+                            <th>Ingress</th>
+                            <th>Egress</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {discoveryPolicies.map((policy) => (
+                            <tr key={`${policy.namespace}/${policy.name}`}>
+                              <td className="mono">
+                                {policy.namespace}/{policy.name}
+                              </td>
+                              <td>{(policy.policyTypes ?? []).join(', ') || '—'}</td>
+                              <td>{policy.ingressRules}</td>
+                              <td>{policy.egressRules}</td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  )}
+                </Panel>
+              )}
+
+              <Panel title="Offline policy inventory" meta={<Badge tone="muted">{filteredPolicies.length}</Badge>}>
+                <div className="toolbar">
+                  <input
+                    value={policyQuery}
+                    onChange={(event) => setPolicyQuery(event.target.value)}
+                    placeholder="Search policies"
+                    aria-label="Search policies"
+                  />
+                  <select
+                    value={namespaceFilter}
+                    onChange={(event) => setNamespaceFilter(event.target.value)}
+                    aria-label="Filter namespace"
+                  >
+                    <option value="all">All namespaces</option>
                     {namespaces.map((namespace) => (
                       <option key={namespace} value={namespace}>
                         {namespace}
                       </option>
                     ))}
                   </select>
-                  {!useDiscoveryTopology && (
-                    <label className="checkbox-row">
-                      <input type="checkbox" checked={changedOnly} onChange={(event) => setChangedOnly(event.target.checked)} />
-                      Changed only
-                    </label>
-                  )}
-                  {hasLiveDiscoveryGraph && (
-                    <Button variant="secondary" onClick={() => void runClusterDiscover()} disabled={data.discoveryLoading}>
-                      {data.discoveryLoading ? 'Refreshing…' : 'Refresh discovery'}
-                    </Button>
-                  )}
-                </div>
-                <div
-                  className={`graph-canvas topology-stage ${panning ? 'panning' : ''}`}
-                  onPointerDown={onGraphPointerDown}
-                  onPointerMove={onGraphPointerMove}
-                  onPointerUp={onGraphPointerUp}
-                  onPointerLeave={onGraphPointerUp}
-                >
-                  <div className="graph-controls">
-                    <Button variant="ghost" onClick={() => setZoom((value) => Math.min(2.5, value + 0.15))} title="Zoom in">
-                      +
-                    </Button>
-                    <Button variant="ghost" onClick={() => setZoom((value) => Math.max(0.5, value - 0.15))} title="Zoom out">
-                      −
-                    </Button>
-                    <Button variant="ghost" onClick={fitGraph} title="Fit to view">
-                      Fit
-                    </Button>
-                  </div>
-                  {topologyNodes.length === 0 ? (
-                    <div className="topology-empty">
-                      <EmptyState
-                        title={useDiscoveryTopology ? 'No discovery graph yet' : 'No analysis graph'}
-                        body={
-                          useDiscoveryTopology
-                            ? 'Run Discover after applying NetworkPolicies. The live graph focuses on namespaces that contain policies.'
-                            : 'Run an offline analysis, or switch to Live discovery.'
-                        }
-                      />
-                    </div>
-                  ) : (
-                    <svg viewBox="0 0 960 560" aria-label="Topology graph" className="topology-svg">
-                      <defs>
-                        <marker id="arrow-allows" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
-                          <path d="M 0 0 L 10 5 L 0 10 z" className="edge-marker allows" />
-                        </marker>
-                        <marker id="arrow-isolates" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
-                          <path d="M 0 0 L 10 5 L 0 10 z" className="edge-marker isolates" />
-                        </marker>
-                        <marker id="arrow-egress" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
-                          <path d="M 0 0 L 10 5 L 0 10 z" className="edge-marker egress" />
-                        </marker>
-                        <marker id="arrow-selects" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
-                          <path d="M 0 0 L 10 5 L 0 10 z" className="edge-marker selects" />
-                        </marker>
-                      </defs>
-                      <g transform={`translate(${pan.x} ${pan.y}) scale(${zoom})`}>
-                        {topologyEdges.map((edge, index) => {
-                          const source = nodeById.get(edge.source)
-                          const target = nodeById.get(edge.target)
-                          if (!source || !target) return null
-                          const kind = 'kind' in edge ? edge.kind : undefined
-                          const x1 = source.x ?? 80
-                          const y1 = source.y ?? 80
-                          const x2 = target.x ?? 280
-                          const y2 = target.y ?? 160
-                          const mx = (x1 + x2) / 2
-                          const my = (y1 + y2) / 2 - 18
-                          return (
-                            <g key={edge.id} className="edge-group" style={{ animationDelay: `${index * 40}ms` }}>
-                              <path
-                                d={`M ${x1} ${y1} Q ${mx} ${my} ${x2} ${y2}`}
-                                className={`edge flow ${kind || 'selects'}`}
-                                markerEnd={`url(#arrow-${kind || 'selects'})`}
-                              />
-                              {edge.label && (
-                                <text className="edge-label" x={mx} y={my - 4}>
-                                  {edge.label}
-                                </text>
-                              )}
-                            </g>
-                          )
-                        })}
-                        {topologyNodes.map((node, index) => {
-                          const cx = node.x ?? 80 + (index % 4) * 110
-                          const cy = node.y ?? 70 + Math.floor(index / 4) * 90
-                          const radius = node.type === 'namespace' ? 28 : node.type === 'policy' ? 22 : 18
-                          return (
-                            <g
-                              key={node.id}
-                              className="node-group"
-                              style={{ animationDelay: `${80 + index * 35}ms` }}
-                              onClick={() => setSelectedNodeId(node.id)}
-                            >
-                              <circle
-                                cx={cx}
-                                cy={cy}
-                                r={radius + 6}
-                                className={`node-halo ${node.type} ${selectedNodeId === node.id ? 'selected' : ''}`}
-                              />
-                              <circle
-                                cx={cx}
-                                cy={cy}
-                                r={radius}
-                                className={`node ${node.type} ${selectedNodeId === node.id ? 'selected' : ''}`}
-                              />
-                              <text className="graph-label" x={cx} y={cy + radius + 16} textAnchor="middle">
-                                {node.label}
-                              </text>
-                            </g>
-                          )
-                        })}
-                      </g>
-                    </svg>
-                  )}
-                </div>
-                <div className="legend" aria-label="Legend">
-                  <span><i className="namespace" />Namespace</span>
-                  <span><i className="policy" />Policy</span>
-                  <span><i className="workload" />Workload</span>
-                  <span className="legend-edge allows">allows / selects</span>
-                  <span className="legend-edge isolates">isolates</span>
-                </div>
-                <div className="list-stack topology-node-list">
-                  {topologyNodes.length === 0 ? (
-                    <EmptyState title="No matching nodes" body="Adjust filters or refresh discovery." />
-                  ) : (
-                    topologyNodes.map((node) => (
-                      <button
-                        key={node.id}
-                        type="button"
-                        className={`graph-node-item ${selectedNodeId === node.id ? 'selected' : ''}`}
-                        onClick={() => setSelectedNodeId(node.id)}
-                      >
-                        <span>{node.label}</span>
-                        <small className="muted">{node.type}</small>
-                      </button>
-                    ))
-                  )}
-                </div>
-              </Panel>
-              <Panel title="Selection" meta={<Badge tone="muted">details</Badge>}>
-                {selectedNode ? (
-                  <div className="detail-card">
-                    <h4>{selectedNode.label}</h4>
-                    <p><strong>ID:</strong> <span className="mono">{selectedNode.id}</span></p>
-                    <p><strong>Type:</strong> {selectedNode.type}</p>
-                    {selectedNode.meta?.namespace && (
-                      <p><strong>Namespace:</strong> {selectedNode.meta.namespace}</p>
-                    )}
-                    {selectedNode.meta?.kind && (
-                      <p><strong>Kind:</strong> {selectedNode.meta.kind}</p>
-                    )}
-                    {selectedNode.meta?.policyTypes && (
-                      <p><strong>Policy types:</strong> {selectedNode.meta.policyTypes.join(', ') || '—'}</p>
-                    )}
-                    {selectedNode.meta?.ingressRules != null && (
-                      <p>
-                        <strong>Rules:</strong> ingress {selectedNode.meta.ingressRules} · egress{' '}
-                        {selectedNode.meta.egressRules ?? 0}
-                      </p>
-                    )}
-                    {selectedNode.meta?.detail && <p className="meta-line">{selectedNode.meta.detail}</p>}
-                    <p className="meta-line">
-                      {useDiscoveryTopology
-                        ? 'Live discovery graph: relationships are inferred from NetworkPolicy selectors. Not a runtime traffic map.'
-                        : 'Offline analysis graph: modeled from manifests, not live cluster traffic.'}
-                    </p>
-                  </div>
-                ) : (
-                  <EmptyState title="Select a node" body="Click a node in the graph to inspect policy or workload details." />
-                )}
-              </Panel>
-            </div>
-          )}
-
-          {route === 'policies' && (
-            <div className="split-2">
-              <Panel title="Analyze manifest" meta={<Badge tone="muted">POST /analyses</Badge>}>
-                <p className="callout">
-                  Paste a NetworkPolicy YAML/JSON document. Analysis is offline and modeled — incomplete inputs yield unknown outcomes, not assumed allow/deny.
-                </p>
-                <textarea className="manifest-editor" value={manifestText} onChange={(event) => setManifestText(event.target.value)} aria-label="Policy manifest" />
-                <Button variant="primary" onClick={() => void runAnalyzeManifest()} disabled={data.dataLoading}>
-                  Analyze proposed manifest
-                </Button>
-              </Panel>
-              <Panel title="Policy inventory" meta={<Badge tone="muted">{filteredPolicies.length}</Badge>}>
-                <div className="toolbar">
-                  <input value={policyQuery} onChange={(event) => setPolicyQuery(event.target.value)} placeholder="Search policies" aria-label="Search policies" />
-                  <select value={namespaceFilter} onChange={(event) => setNamespaceFilter(event.target.value)} aria-label="Filter namespace">
-                    <option value="all">All namespaces</option>
-                    {namespaces.map((namespace) => (
-                      <option key={namespace} value={namespace}>{namespace}</option>
-                    ))}
-                  </select>
                 </div>
                 {filteredPolicies.length === 0 ? (
-                  <EmptyState title="No policies" body="Load an analysis or analyze a manifest to populate the inventory." />
+                  <EmptyState title="No policies" body="Analyze a manifest or load a sample to populate this list." />
                 ) : (
                   <div className="policy-list">
                     {filteredPolicies.map((policy) => {
@@ -1222,9 +1243,9 @@ function App() {
                       const open = expandedPolicy === key
                       return (
                         <article key={key} className="policy-card">
-                          <div style={{ display: 'flex', justifyContent: 'space-between', gap: 8 }}>
+                          <div className="policy-card-head">
                             <h4>{key}</h4>
-                            <div style={{ display: 'flex', gap: 6 }}>
+                            <div className="page-actions">
                               {policy.defaultDeny && <Badge tone="warning">default deny</Badge>}
                               <Badge tone="info">{policy.policyType || 'types unknown'}</Badge>
                             </div>
@@ -1238,8 +1259,14 @@ function App() {
                           </Button>
                           {open && (
                             <div className="detail-card" style={{ marginTop: 10 }}>
-                              <p><strong>Match labels:</strong> {(policy.matchLabels ?? []).join(', ') || 'None listed'}</p>
-                              <p><strong>Related peers:</strong> {(policy.relatedPeers ?? []).join(', ') || 'None listed'}</p>
+                              <p>
+                                <strong>Match labels:</strong>{' '}
+                                {(policy.matchLabels ?? []).join(', ') || 'None listed'}
+                              </p>
+                              <p>
+                                <strong>Related peers:</strong>{' '}
+                                {(policy.relatedPeers ?? []).join(', ') || 'None listed'}
+                              </p>
                             </div>
                           )}
                         </article>
@@ -1248,392 +1275,398 @@ function App() {
                   </div>
                 )}
               </Panel>
-            </div>
+            </>
           )}
 
-          {route === 'results' && (
-            <Panel title="Analysis results" meta={<Badge tone="info">modeled</Badge>}>
-              {!data.analysis ? (
-                <EmptyState
-                  title="No analysis loaded"
-                  body="Refresh the workspace or analyze a manifest from Policies."
-                  action={<Button variant="secondary" onClick={() => setRoute('policies')}>Go to policies</Button>}
-                />
-              ) : (
-                <>
-                  <div className="metrics-grid">
-                    <article className="metric-card"><span>Path</span><strong style={{ fontSize: '1rem' }} className="mono">{data.analysis.path || 'manifest'}</strong></article>
-                    <article className="metric-card"><span>Generated</span><strong style={{ fontSize: '1rem' }}>{new Date(data.analysis.generatedAt).toLocaleString()}</strong></article>
-                    <article className="metric-card"><span>Policies</span><strong>{data.analysis.summary.totalPolicies}</strong></article>
-                    <article className="metric-card"><span>Findings</span><strong>{data.analysis.summary.findingCount}</strong></article>
-                  </div>
-                  <div className="page-actions">
-                    <Button variant="primary" onClick={() => void runCreateSnapshot()}>Save snapshot</Button>
-                    <Button variant="secondary" onClick={() => setRoute('findings')}>View findings</Button>
-                    <Button variant="secondary" onClick={() => setRoute('reports')}>Generate report</Button>
-                  </div>
-                  <p className="callout" style={{ marginTop: 16 }}>
-                    <strong>Layer:</strong> These results are modeled from manifests. They are not live cluster observations and do not prove NetworkPolicy causation for runtime failures.
-                  </p>
-                </>
-              )}
-            </Panel>
-          )}
-
-          {route === 'findings' && (
-            <div className="stacked-grid">
-              <Panel title="Findings" meta={<Badge tone="muted">{filteredFindings.length}</Badge>}>
-                <div className="toolbar">
-                  <input value={searchText} onChange={(event) => setSearchText(event.target.value)} placeholder="Search findings" aria-label="Search findings" />
-                  <select value={severityFilter} onChange={(event) => setSeverityFilter(event.target.value)} aria-label="Severity filter">
-                    <option value="all">All severities</option>
-                    <option value="critical">Critical</option>
-                    <option value="high">High</option>
-                    <option value="medium">Medium</option>
-                    <option value="low">Low</option>
-                  </select>
+          {route === 'compare' && (
+            <>
+              <PageHeader
+                breadcrumbs={['PCI', 'Compare']}
+                title="Compare"
+                description="Diff a base policy set against a proposed set"
+                actions={
+                  <Button variant="primary" onClick={() => void runDiff()} disabled={data.dataLoading}>
+                    Run comparison
+                  </Button>
+                }
+              />
+              <Callout tone="warning">
+                این مقایسه تغییرات policy را نشان می‌دهد؛ به‌تنهایی علت قطع ترافیک را اثبات نمی‌کند.
+              </Callout>
+              <Panel title="Inputs">
+                <div className="segmented" role="group" aria-label="Compare input mode">
+                  <button
+                    type="button"
+                    className={compareMode === 'paths' ? 'active' : ''}
+                    onClick={() => setCompareMode('paths')}
+                  >
+                    1. Paths
+                  </button>
+                  <button
+                    type="button"
+                    className={compareMode === 'manifests' ? 'active' : ''}
+                    onClick={() => setCompareMode('manifests')}
+                  >
+                    2. Paste YAML
+                  </button>
                 </div>
-                {filteredFindings.length === 0 ? (
-                  <EmptyState title="No findings match" body="Try clearing filters or analyze a different manifest set." />
-                ) : (
-                  <div className="table-wrap">
-                    <table className="data-table">
-                      <thead>
-                        <tr>
-                          <th>ID</th>
-                          <th>Severity</th>
-                          <th>Kind</th>
-                          <th>Message</th>
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {filteredFindings.map((finding) => (
-                          <tr
-                            key={finding.id}
-                            className={selectedFindingId === finding.id ? 'selected' : ''}
-                            onClick={() => void runExplain(finding.id)}
-                          >
-                            <td className="mono">{finding.id}</td>
-                            <td><Badge tone={severityTone(finding.severity)}>{finding.severity || 'n/a'}</Badge></td>
-                            <td>{finding.kind || '—'}</td>
-                            <td>{finding.message}</td>
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
-                  </div>
-                )}
-              </Panel>
-              <Panel title="Explanation" meta={<Badge tone="info">modeled</Badge>}>
-                {data.selectedFinding ? (
-                  <div className="detail-card">
-                    <h4 className="mono">{data.selectedFinding.findingId}</h4>
-                    <p><strong>Traffic status:</strong> {data.selectedFinding.trafficStatus}</p>
-                    <p><strong>Summary:</strong> {data.selectedFinding.summary}</p>
-                    <p><strong>Reason:</strong> {data.selectedFinding.reason}</p>
-                    <p><strong>Applicable policies:</strong> {(data.selectedFinding.applicablePolicies ?? []).join(', ') || 'Not available'}</p>
-                    <p><strong>Assumptions:</strong> {(data.selectedFinding.assumptions ?? []).join('; ') || 'None documented'}</p>
-                    <p><strong>Unsupported:</strong> {(data.selectedFinding.unsupported ?? []).join('; ') || 'None listed'}</p>
-                    <p className="meta-line">Explanations describe the static model. They are not verified runtime outcomes.</p>
-                  </div>
-                ) : (
-                  <EmptyState title="Select a finding" body="Choose a row to load a structured explanation from the API." />
-                )}
-              </Panel>
-            </div>
-          )}
-
-          {route === 'comparison' && (
-            <Panel title="Base vs proposed" meta={<Badge tone="warning">config delta ≠ causation</Badge>}>
-              <div className="toolbar">
-                <label className="field">
-                  Base path
-                  <input value={analysisPath} onChange={(event) => setAnalysisPath(event.target.value)} />
-                </label>
-                <label className="field">
-                  Proposed path
-                  <input value={proposedPath} onChange={(event) => setProposedPath(event.target.value)} />
-                </label>
-              </div>
-              <p className="callout">
-                Semantic diffs show how policy configuration changed. A modified rule does not by itself prove a runtime connectivity failure.
-              </p>
-              {!data.diff ? (
-                <EmptyState
-                  title="No comparison loaded"
-                  body="Run a comparison against the configured base and proposed paths."
-                  action={<Button variant="primary" onClick={() => void runDiff()}>Run comparison</Button>}
-                />
-              ) : (
-                <div className="split-2">
-                  <div className="detail-card">
-                    <h4>Added ({data.diff.added.length})</h4>
-                    <p>{data.diff.added.length ? data.diff.added.join(', ') : 'None'}</p>
-                    <h4>Removed ({data.diff.removed.length})</h4>
-                    <p>{data.diff.removed.length ? data.diff.removed.join(', ') : 'None'}</p>
-                  </div>
-                  <div className="detail-card">
-                    <h4>Modified ({data.diff.modified.length})</h4>
-                    {data.diff.modified.length === 0 ? (
-                      <p>None</p>
-                    ) : (
-                      <ul className="list-stack">
-                        {data.diff.modified.map((entry) => (
-                          <li key={entry.key} className="list-item">
-                            <strong>{entry.key}</strong>
-                            <p className="meta-line">{entry.reason}</p>
-                            <p className="meta-line">Fields: {entry.changedFields.join(', ') || 'Not reported'}</p>
-                            <details>
-                              <summary>Exact field delta</summary>
-                              {entry.fieldChanges.map((change) => (
-                                <div key={change.field}>
-                                  <strong className="mono">{change.field}</strong>
-                                  <pre className="diff-pre">Before: {JSON.stringify(change.before, null, 2)}</pre>
-                                  <pre className="diff-pre">After: {JSON.stringify(change.after, null, 2)}</pre>
-                                </div>
-                              ))}
-                            </details>
-                          </li>
-                        ))}
-                      </ul>
+                {compareMode === 'paths' ? (
+                  <div className="toolbar" style={{ marginTop: 12 }}>
+                    <label className="field">
+                      Base path
+                      <input value={analysisPath} onChange={(event) => setAnalysisPath(event.target.value)} />
+                    </label>
+                    <label className="field">
+                      Proposed path
+                      <input value={proposedPath} onChange={(event) => setProposedPath(event.target.value)} />
+                    </label>
+                    {sampleAvailable && (
+                      <Button
+                        variant="ghost"
+                        onClick={() => {
+                          setAnalysisPath(sampleBase)
+                          setProposedPath(sampleProposed)
+                        }}
+                      >
+                        Use sample paths
+                      </Button>
                     )}
                   </div>
-                </div>
-              )}
-            </Panel>
-          )}
-
-          {route === 'snapshots' && (
-            <Panel title="Snapshots" meta={<Badge tone="muted">{data.snapshots.length}</Badge>}>
-              {data.snapshots.length === 0 ? (
-                <EmptyState
-                  title="No snapshots stored"
-                  body="Create a snapshot from the current analysis path to retain an offline baseline."
-                  action={<Button variant="primary" onClick={() => void runCreateSnapshot()}>Create snapshot</Button>}
-                />
-              ) : (
-                <ul className="list-stack">
-                  {data.snapshots.map((snapshot) => (
-                    <li key={snapshot.id} className="snapshot-row">
-                      <div style={{ display: 'flex', justifyContent: 'space-between', gap: 8 }}>
-                        <strong>{snapshot.name || snapshot.id}</strong>
-                        <Badge tone="muted">{snapshot.summary?.findingCount ?? 0} findings</Badge>
-                      </div>
-                      <p className="mono meta-line">{snapshot.id}</p>
-                      <p className="meta-line">{snapshot.generatedAt || snapshot.path}</p>
-                      <p className="meta-line">
-                        Policies {snapshot.summary?.totalPolicies ?? '—'} · Default deny {snapshot.summary?.defaultDeny ?? '—'}
-                      </p>
-                    </li>
-                  ))}
-                </ul>
-              )}
-            </Panel>
-          )}
-
-          {route === 'verification' && (
-            <Panel
-              title="Runtime verification evidence"
-              meta={<Badge tone={data.verificationEnabled ? 'warning' : 'muted'}>{data.verificationEnabled ? 'provider present' : 'disabled'}</Badge>}
-            >
-              <p className="callout">
-                <strong>Layers stay separate.</strong> Modeled predictions, runtime observations, and NetworkPolicy causation are not the same.
-                A failed connection does not prove NetworkPolicy caused the failure. This UI never fabricates probe results.
-              </p>
-              {!data.verificationEnabled && (
-                <EmptyState
-                  title="Runtime verification disabled"
-                  body="No production probe provider is installed. The API accepts evidence contracts for tests only; normal operation returns VERIFICATION_DISABLED."
-                />
-              )}
-              {data.verificationEvidence.length === 0 ? (
-                <EmptyState
-                  title="No observation evidence"
-                  body="When a provider records evidence, it will appear here with provenance, timestamps, and limitations."
-                />
-              ) : (
-                <ul className="list-stack">
-                  {data.verificationEvidence.map((evidence) => (
-                    <li key={evidence.id} className="evidence-card">
-                      <div style={{ display: 'flex', justifyContent: 'space-between', gap: 8, flexWrap: 'wrap' }}>
-                        <strong>{evidence.state.replace(/_/g, ' ')} · {evidence.provenance}</strong>
-                        <Badge tone="info">{evidence.modelComparison}</Badge>
-                      </div>
-                      <p className="mono meta-line">
-                        {evidence.sourceNamespace}/{evidence.sourceWorkload} → {evidence.destination}:{evidence.port}/{evidence.protocol}
-                      </p>
-                      <p className="meta-line">
-                        {evidence.method} · {new Date(evidence.attemptedAt).toLocaleString()} · {evidence.outcome} · {api.formatDurationMs(evidence.duration)}
-                        {evidence.timeoutMillis === undefined ? '' : ` · timeout ${evidence.timeoutMillis} ms`}
-                      </p>
-                      {(evidence.cluster || evidence.context || evidence.cni) && (
-                        <p className="meta-line">Environment: {[evidence.cluster, evidence.context, evidence.cni].filter(Boolean).join(' / ')}</p>
+                ) : (
+                  <div className="split-2" style={{ marginTop: 12 }}>
+                    <label className="field">
+                      Base (YAML/JSON)
+                      <textarea
+                        className="manifest-editor short"
+                        value={baseManifest}
+                        onChange={(event) => setBaseManifest(event.target.value)}
+                        aria-label="Base manifest"
+                      />
+                    </label>
+                    <label className="field">
+                      Proposed (YAML/JSON)
+                      <textarea
+                        className="manifest-editor short"
+                        value={proposedManifest}
+                        onChange={(event) => setProposedManifest(event.target.value)}
+                        aria-label="Proposed manifest"
+                      />
+                    </label>
+                  </div>
+                )}
+                <p className="meta-line" style={{ marginTop: 8 }}>
+                  3. Run comparison → 4. Review added / removed / modified fields below.
+                </p>
+              </Panel>
+              <Panel title="Changes" meta={<Badge tone="warning">config delta ≠ causation</Badge>}>
+                {!data.diff ? (
+                  <EmptyState
+                    title="No comparison yet"
+                    body="Choose base and proposed inputs, then run comparison."
+                    action={
+                      <Button variant="primary" onClick={() => void runDiff()}>
+                        Run comparison
+                      </Button>
+                    }
+                  />
+                ) : (
+                  <div className="split-2">
+                    <div className="detail-card">
+                      <h4>Added ({data.diff.added.length})</h4>
+                      <p>{data.diff.added.length ? data.diff.added.join(', ') : 'None'}</p>
+                      <h4>Removed ({data.diff.removed.length})</h4>
+                      <p>{data.diff.removed.length ? data.diff.removed.join(', ') : 'None'}</p>
+                      {(data.diff.findings?.length ?? 0) > 0 && (
+                        <>
+                          <h4>Comparison findings ({data.diff.findings.length})</h4>
+                          <ul className="list-stack">
+                            {data.diff.findings.map((finding) => (
+                              <li key={finding.id} className="list-item">
+                                <Badge tone={severityTone(finding.severity)}>{severityLabel(finding.severity)}</Badge>{' '}
+                                {finding.message}
+                              </li>
+                            ))}
+                          </ul>
+                        </>
                       )}
-                      {evidence.discoveryCollectedAt && (
-                        <p className="meta-line">
-                          Discovery: {new Date(evidence.discoveryCollectedAt).toLocaleString()} ·{' '}
-                          {evidence.discoveryComplete === undefined ? 'completeness unknown' : evidence.discoveryComplete ? 'complete' : 'incomplete'}
-                        </p>
+                    </div>
+                    <div className="detail-card">
+                      <h4>Modified ({data.diff.modified.length})</h4>
+                      {data.diff.modified.length === 0 ? (
+                        <p>None</p>
+                      ) : (
+                        <ul className="list-stack">
+                          {data.diff.modified.map((entry) => (
+                            <li key={entry.key} className="list-item">
+                              <strong>{entry.key}</strong>
+                              <p className="meta-line">{entry.reason}</p>
+                              <p className="meta-line">
+                                Fields: {entry.changedFields.join(', ') || 'Not reported'}
+                              </p>
+                              <details>
+                                <summary>Field path before / after</summary>
+                                {entry.fieldChanges.map((change) => (
+                                  <div key={change.field}>
+                                    <strong className="mono">{change.field}</strong>
+                                    <pre className="diff-pre">Before: {JSON.stringify(change.before, null, 2)}</pre>
+                                    <pre className="diff-pre">After: {JSON.stringify(change.after, null, 2)}</pre>
+                                  </div>
+                                ))}
+                              </details>
+                            </li>
+                          ))}
+                        </ul>
                       )}
-                      <p className="meta-line">{evidence.limitations?.join(' ')}</p>
-                      {evidence.errorClass && <p className="meta-line">Error class: {evidence.errorClass}</p>}
-                    </li>
-                  ))}
-                </ul>
-              )}
-            </Panel>
+                    </div>
+                  </div>
+                )}
+              </Panel>
+            </>
           )}
 
           {route === 'reports' && (
-            <Panel title="Report" meta={<Badge tone="muted">review artifact</Badge>}>
-              {!data.report ? (
-                <EmptyState
-                  title="No report generated"
-                  body="Generate a report from the current analysis or configured path. Reports are offline review artifacts."
-                  action={<Button variant="primary" onClick={() => void runReport()}>Generate report</Button>}
-                />
-              ) : (
-                <>
-                  <div className="metrics-grid">
-                    <article className="metric-card"><span>Policies</span><strong>{data.report.policyCount ?? data.report.summary?.totalPolicies ?? '—'}</strong></article>
-                    <article className="metric-card"><span>Findings</span><strong>{data.report.findingCount ?? data.report.summary?.findingCount ?? '—'}</strong></article>
-                    <article className="metric-card"><span>Generated</span><strong style={{ fontSize: '1rem' }}>{data.report.generatedAt ? new Date(data.report.generatedAt).toLocaleString() : '—'}</strong></article>
-                    <article className="metric-card"><span>Analysis</span><strong style={{ fontSize: '0.9rem' }} className="mono">{data.report.analysisId || '—'}</strong></article>
-                  </div>
-                  {data.report.recommendation && <p className="callout">{data.report.recommendation}</p>}
-                  <h3 style={{ fontSize: '0.95rem' }}>Raw report JSON</h3>
-                  <pre className="json-box">{JSON.stringify(data.report, null, 2)}</pre>
-                </>
-              )}
-            </Panel>
-          )}
-
-          {route === 'settings' && (
-            <Panel title="Settings" meta={<Badge tone="muted">local</Badge>}>
-              <div className="settings-grid">
-                <label>
-                  API base URL
-                  <input value={api.API_BASE} readOnly title="Configured via Vite proxy or VITE_API_BASE" />
-                </label>
-                <label>
-                  Server version
-                  <input value={data.health?.version ?? 'unknown'} readOnly />
-                </label>
-                <label className="span-2">
-                  Workspace analysis path
-                  <div style={{ display: 'flex', gap: 8 }}>
-                    <input
-                      value={workspacePathDraft}
-                      onChange={(event) => setWorkspacePathDraft(event.target.value)}
-                      style={{ flex: 1 }}
-                    />
-                    <Button
-                      variant="primary"
-                      onClick={() => {
-                        setAnalysisPath(workspacePathDraft)
-                        setWorkspacePath(workspacePathDraft)
-                      }}
-                      disabled={!workspacePathDraft.trim() || workspacePathDraft === workspacePath}
-                    >
-                      Apply & reload
+            <>
+              <PageHeader
+                breadcrumbs={['PCI', 'Reports']}
+                title="Reports"
+                description="Findings from the current analysis, listed snapshots, and the last generated report"
+                actions={
+                  <div className="page-actions">
+                    <Button variant="secondary" onClick={() => void runCreateSnapshot()} disabled={!data.apiConnected}>
+                      Save snapshot
+                    </Button>
+                    <Button variant="primary" onClick={() => void runReport()} disabled={data.dataLoading}>
+                      Generate report
                     </Button>
                   </div>
-                </label>
-                <label>
-                  SQLite persistence
-                  <input value={data.health?.database?.sqlite ? 'available' : 'unavailable'} readOnly />
-                </label>
-                <label>
-                  Connection mode
-                  <input
-                    value={
-                      kubeSettings?.resolvedMode ||
-                      kubeSettings?.mode ||
-                      (kubeSettings?.inClusterEnv ? 'in-cluster (env)' : 'auto')
-                    }
-                    readOnly
-                  />
-                </label>
-                <label>
-                  Config source
-                  <input value={kubeSettings?.source || kubeSettings?.resolvedKubeconfigPath || '(unresolved)'} readOnly />
-                </label>
-                <label>
-                  Kubeconfig (configured)
-                  <input
-                    value={
-                      kubeSettings?.resolvedMode === 'in-cluster'
-                        ? '(in-cluster service account)'
-                        : kubeSettings?.kubeconfigPath || kubeSettings?.resolvedKubeconfigPath || '(default rules)'
-                    }
-                    readOnly
-                  />
-                </label>
-                <label>
-                  Context (resolved)
-                  <input value={kubeSettings?.resolvedContext || kubeSettings?.context || data.clusterDiscovery?.cluster?.context || '(current-context)'} readOnly />
-                </label>
-                <label>
-                  Last discovery
-                  <input
-                    value={
-                      data.clusterDiscovery?.collectedAt
-                        ? new Date(data.clusterDiscovery.collectedAt).toLocaleString()
-                        : 'not yet run'
-                    }
-                    readOnly
-                  />
-                </label>
-                <label className="span-2">
-                  Kubernetes discovery status
-                  <input
-                    value={
-                      data.clusterDiscovery
-                        ? `${data.clusterDiscovery.mode} / ${data.clusterDiscovery.status}${data.clusterDiscovery.offline ? ' (offline)' : ''}${data.clusterDiscovery.complete ? '' : ' · incomplete'}`
-                        : discovery
-                          ? `${discovery.mode} / ${discovery.status}${discovery.offline ? ' (offline)' : ''}`
-                          : 'not reported'
-                    }
-                    readOnly
-                  />
-                </label>
-                <label className="span-2">
-                  Capabilities
-                  <textarea
-                    readOnly
-                    rows={3}
-                    value={(data.capabilities?.capabilities ?? []).join(', ') || 'none reported'}
-                  />
-                </label>
+                }
+              />
+              <Callout tone="muted">
+                Findings come from the current offline analysis. Snapshots are loaded from{' '}
+                <span className="mono">GET /snapshots</span>. There is no report list API — Generate report shows
+                only the report created in this session (and stores it server-side when SQLite is available).
+              </Callout>
+              <div className="segmented" role="tablist" aria-label="Reports sections">
+                <button
+                  type="button"
+                  role="tab"
+                  aria-selected={reportsTab === 'findings'}
+                  className={reportsTab === 'findings' ? 'active' : ''}
+                  onClick={() => setReportsTab('findings')}
+                >
+                  Findings
+                </button>
+                <button
+                  type="button"
+                  role="tab"
+                  aria-selected={reportsTab === 'snapshots'}
+                  className={reportsTab === 'snapshots' ? 'active' : ''}
+                  onClick={() => setReportsTab('snapshots')}
+                >
+                  Snapshots
+                </button>
+                <button
+                  type="button"
+                  role="tab"
+                  aria-selected={reportsTab === 'report'}
+                  className={reportsTab === 'report' ? 'active' : ''}
+                  onClick={() => setReportsTab('report')}
+                >
+                  Report
+                </button>
               </div>
-              <div className="page-actions" style={{ marginTop: 16 }}>
-                <Button variant="primary" onClick={() => void runClusterDiscover()} disabled={data.discoveryLoading || !data.apiConnected}>
-                  {data.discoveryLoading ? 'Discovering…' : 'Discover / Refresh cluster'}
-                </Button>
-              </div>
-              <p className="callout" style={{ marginTop: 16 }}>
-                Changing the analysis path reloads offline workspace data. Kubernetes connectivity is configured on the API process, not in the browser.
-                Helm/in-cluster installs use the Pod ServiceAccount (<span className="mono">PCI_KUBE_MODE=in-cluster</span>).
-                Local development: <span className="mono">pci serve --kubeconfig ~/.kube/config --kube-context kind-kind --all-namespaces</span>.
-                Discovery is read-only; controlled apply and runtime probes are not enabled by default.
-              </p>
-              {(discovery?.warnings?.length ?? 0) > 0 && (
-                <div className="detail-card">
-                  <h4>Discovery warnings</h4>
-                  <ul>
-                    {discovery?.warnings?.map((warning) => (
-                      <li key={warning}>{warning}</li>
-                    ))}
-                  </ul>
+
+              {reportsTab === 'findings' && (
+                <div className="topology-layout" style={{ marginTop: 16 }}>
+                  <Panel title="Findings" meta={<Badge tone="muted">{filteredFindings.length}</Badge>}>
+                    <div className="toolbar">
+                      <input
+                        value={searchText}
+                        onChange={(event) => setSearchText(event.target.value)}
+                        placeholder="Search findings"
+                        aria-label="Search findings"
+                      />
+                      <select
+                        value={severityFilter}
+                        onChange={(event) => setSeverityFilter(event.target.value)}
+                        aria-label="Severity filter"
+                      >
+                        <option value="all">All severities</option>
+                        <option value="critical">Critical</option>
+                        <option value="high">High</option>
+                        <option value="medium">Medium</option>
+                        <option value="low">Low</option>
+                      </select>
+                    </div>
+                    {filteredFindings.length === 0 ? (
+                      <EmptyState
+                        title="No findings"
+                        body="Analyze policies first to produce modeled findings."
+                        action={
+                          <Button variant="secondary" onClick={() => setRoute('policies')}>
+                            Go to Policies
+                          </Button>
+                        }
+                      />
+                    ) : (
+                      <ul className="finding-list">
+                        {filteredFindings.map((finding) => {
+                          const open = expandedFinding === finding.id
+                          return (
+                            <li key={finding.id} className="list-item">
+                              <div className="policy-card-head">
+                                <strong>{finding.message}</strong>
+                                <Badge tone={severityTone(finding.severity)} title={`Severity: ${finding.severity}`}>
+                                  Severity: {severityLabel(finding.severity)}
+                                </Badge>
+                              </div>
+                              <p className="meta-line mono">
+                                {finding.id} · {finding.kind || 'finding'}
+                              </p>
+                              <Button
+                                variant="ghost"
+                                onClick={() => {
+                                  if (open) {
+                                    setExpandedFinding(null)
+                                  } else {
+                                    void runExplain(finding.id)
+                                  }
+                                }}
+                              >
+                                {open ? 'Hide explanation' : 'Show explanation'}
+                              </Button>
+                              {open && data.selectedFinding?.findingId === finding.id && (
+                                <div className="detail-card" style={{ marginTop: 10 }}>
+                                  <p>
+                                    <strong>Traffic status:</strong> {data.selectedFinding.trafficStatus}
+                                  </p>
+                                  <p>
+                                    <strong>Summary:</strong> {data.selectedFinding.summary}
+                                  </p>
+                                  <p>
+                                    <strong>Reason:</strong> {data.selectedFinding.reason}
+                                  </p>
+                                  <p className="meta-line">
+                                    Modeled explanation — not a verified runtime outcome.
+                                  </p>
+                                </div>
+                              )}
+                            </li>
+                          )
+                        })}
+                      </ul>
+                    )}
+                  </Panel>
+                  <Panel title="Selected explanation" meta={<Badge tone="info">modeled</Badge>}>
+                    {data.selectedFinding && selectedFindingId ? (
+                      <div className="detail-card">
+                        <h4 className="mono">{data.selectedFinding.findingId}</h4>
+                        <p>
+                          <strong>Summary:</strong> {data.selectedFinding.summary}
+                        </p>
+                        <p>
+                          <strong>Reason:</strong> {data.selectedFinding.reason}
+                        </p>
+                        <p>
+                          <strong>Applicable policies:</strong>{' '}
+                          {(data.selectedFinding.applicablePolicies ?? []).join(', ') || 'Not available'}
+                        </p>
+                        <details>
+                          <summary>Assumptions & unsupported</summary>
+                          <p>{(data.selectedFinding.assumptions ?? []).join('; ') || 'None documented'}</p>
+                          <p>{(data.selectedFinding.unsupported ?? []).join('; ') || 'None listed'}</p>
+                        </details>
+                      </div>
+                    ) : (
+                      <EmptyState title="Select a finding" body="Open a finding to load its API explanation." />
+                    )}
+                  </Panel>
                 </div>
               )}
-              {kubeSettings?.error && (
-                <div className="detail-card">
-                  <h4>Kubeconfig load error</h4>
-                  <p className="meta-line">{kubeSettings.error}</p>
-                </div>
+
+              {reportsTab === 'snapshots' && (
+                <Panel
+                  title="Snapshots from API"
+                  meta={<Badge tone="muted">{data.snapshots.length} loaded</Badge>}
+                >
+                  <p className="meta-line" style={{ marginBottom: 12 }}>
+                    Showing snapshots returned by the API (up to 8 on load), not a complete archive browser.
+                  </p>
+                  {data.snapshots.length === 0 ? (
+                    <EmptyState
+                      title="No snapshots returned"
+                      body="Save a snapshot from the current analysis, then Refresh to reload the list from the API."
+                      action={
+                        <Button variant="primary" onClick={() => void runCreateSnapshot()}>
+                          Save snapshot
+                        </Button>
+                      }
+                    />
+                  ) : (
+                    <ul className="list-stack">
+                      {data.snapshots.map((snapshot) => (
+                        <li key={snapshot.id} className="snapshot-row">
+                          <div className="policy-card-head">
+                            <strong>{snapshot.name || snapshot.id}</strong>
+                            <Badge tone="muted">{snapshot.summary?.findingCount ?? 0} findings</Badge>
+                          </div>
+                          <p className="mono meta-line">{snapshot.id}</p>
+                          <p className="meta-line">
+                            {snapshot.generatedAt
+                              ? new Date(snapshot.generatedAt).toLocaleString()
+                              : snapshot.path}{' '}
+                            · Policies {snapshot.summary?.totalPolicies ?? '—'}
+                          </p>
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                </Panel>
               )}
-            </Panel>
+
+              {reportsTab === 'report' && (
+                <Panel title="Last generated report (this session)" meta={<Badge tone="muted">POST only</Badge>}>
+                  {!data.report ? (
+                    <EmptyState
+                      title="No report in this session"
+                      body="PCI cannot list historical reports yet. Generate one from the current analysis to view it here."
+                      action={
+                        <Button variant="primary" onClick={() => void runReport()}>
+                          Generate report
+                        </Button>
+                      }
+                    />
+                  ) : (
+                    <>
+                      <div className="metrics-grid">
+                        <StatTile
+                          label="Policies"
+                          value={data.report.policyCount ?? data.report.summary?.totalPolicies ?? '—'}
+                        />
+                        <StatTile
+                          label="Findings"
+                          value={data.report.findingCount ?? data.report.summary?.findingCount ?? '—'}
+                        />
+                        <StatTile
+                          label="Generated"
+                          value={
+                            data.report.generatedAt
+                              ? new Date(data.report.generatedAt).toLocaleString()
+                              : '—'
+                          }
+                        />
+                        <StatTile label="Analysis" value={data.report.analysisId || '—'} />
+                      </div>
+                      {data.report.recommendation && <Callout tone="info">{data.report.recommendation}</Callout>}
+                      <details>
+                        <summary>Raw report JSON</summary>
+                        <pre className="json-box">{JSON.stringify(data.report, null, 2)}</pre>
+                      </details>
+                    </>
+                  )}
+                </Panel>
+              )}
+            </>
           )}
         </main>
       </div>

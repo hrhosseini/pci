@@ -62,7 +62,7 @@
 
 .nav-item {
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   gap: var(--space-3);
   width: 100%;
   padding: 9px 10px;
@@ -73,6 +73,25 @@
   text-align: left;
   cursor: pointer;
   transition: background 120ms ease, color 120ms ease, border-color 120ms ease;
+}
+
+.nav-item-copy {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.nav-item-label {
+  font-size: 0.875rem;
+  font-weight: 550;
+  color: inherit;
+}
+
+.nav-item-desc {
+  font-size: 0.7rem;
+  line-height: 1.3;
+  color: var(--text-muted);
 }
 
 .nav-item:hover {
@@ -88,6 +107,7 @@
 
 .nav-item .icon {
   flex-shrink: 0;
+  margin-top: 2px;
   opacity: 0.9;
 }
 
@@ -977,14 +997,182 @@
   font-size: 0.72rem;
 }
 
+.status-bar {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: var(--space-3);
+  margin-bottom: var(--space-4);
+  padding: var(--space-3) var(--space-4);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+}
+
+.status-bar .status-label {
+  display: block;
+  color: var(--text-muted);
+  font-size: 0.72rem;
+  margin-bottom: 4px;
+}
+
+.status-bar strong {
+  font-size: 0.9rem;
+  font-weight: 560;
+}
+
+.stat-tile {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: var(--space-4);
+  box-shadow: var(--shadow);
+}
+
+.stat-tile.unavailable {
+  opacity: 0.85;
+}
+
+.stat-label {
+  display: block;
+  color: var(--text-muted);
+  font-size: 0.75rem;
+  margin-bottom: 6px;
+}
+
+.stat-value {
+  display: block;
+  font-size: 1.45rem;
+  font-weight: 600;
+  letter-spacing: -0.03em;
+  font-variant-numeric: tabular-nums;
+  word-break: break-word;
+}
+
+.stat-hint {
+  display: block;
+  margin-top: 6px;
+  color: var(--text-secondary);
+  font-size: 0.75rem;
+}
+
+.metrics-grid.compact .stat-value {
+  font-size: 1.05rem;
+}
+
+.action-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  gap: var(--space-3);
+}
+
+.action-card {
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  gap: var(--space-3);
+  min-height: 150px;
+  padding: var(--space-4);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface-2);
+}
+
+.action-card-badge {
+  display: inline-block;
+  margin-bottom: 6px;
+  color: var(--text-muted);
+  font-size: 0.68rem;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.action-card h3 {
+  margin: 0 0 6px;
+  font-size: 0.95rem;
+}
+
+.action-card p {
+  margin: 0;
+  color: var(--text-secondary);
+  font-size: 0.82rem;
+  line-height: 1.4;
+}
+
+.action-card-cta {
+  margin-top: auto;
+}
+
+.inline-callout {
+  margin: 0 0 var(--space-4);
+  padding: 10px 12px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--text-secondary);
+  font-size: 0.84rem;
+  line-height: 1.45;
+}
+
+.inline-callout.tone-info {
+  border-color: var(--accent-border);
+  background: var(--accent-soft);
+}
+
+.inline-callout.tone-warning {
+  border-color: rgba(232, 168, 56, 0.4);
+  background: var(--warning-soft);
+  color: var(--text);
+}
+
+.limits-list {
+  margin: 0;
+  padding-left: 1.15rem;
+  color: var(--text-secondary);
+  font-size: 0.86rem;
+  line-height: 1.55;
+}
+
+.limits-list li + li {
+  margin-top: 6px;
+}
+
+.topology-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1.6fr) minmax(240px, 0.7fr);
+  gap: var(--space-4);
+}
+
+.policy-card-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  align-items: flex-start;
+  flex-wrap: wrap;
+}
+
+.clickable-row {
+  cursor: pointer;
+}
+
+.clickable-row:hover {
+  background: var(--surface-hover);
+}
+
+.manifest-editor.short {
+  min-height: 180px;
+}
+
 @media (max-width: 1100px) {
-  .metrics-grid {
+  .metrics-grid,
+  .status-bar {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
   .content-grid,
   .stacked-grid,
   .split-2,
-  .settings-grid {
+  .settings-grid,
+  .topology-layout {
     grid-template-columns: 1fr;
   }
 }
@@ -1003,6 +1191,9 @@
     display: grid;
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
+  .nav-item-desc {
+    display: none;
+  }
   .topbar {
     flex-direction: column;
     align-items: flex-start;
@@ -1011,7 +1202,8 @@
   .page-header {
     flex-direction: column;
   }
-  .metrics-grid {
+  .metrics-grid,
+  .status-bar {
     grid-template-columns: 1fr;
   }
 }
